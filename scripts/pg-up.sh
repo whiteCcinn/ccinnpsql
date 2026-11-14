@@ -91,4 +91,12 @@ for version in "${versions[@]}"; do
     sleep 1
   done
 done
+# Demo data for the integration tests and screenshots.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+for version in "${versions[@]}"; do
+  name="ccinnpsql-it-pg${version//./}"
+  docker exec -i "$name" psql -q -U ccinn -d ccinn -v ON_ERROR_STOP=1 < "$SCRIPT_DIR/seed-demo.sql" >/dev/null 2>&1 \
+    && docker exec -i "$name" psql -q -U ccinn -d ccinn -v ON_ERROR_STOP=1 < "$SCRIPT_DIR/seed-modern.sql" >/dev/null 2>&1 \
+    && echo "seeded  $name" || echo "SEED FAILED for $name"
+done
 echo "CA certificate: $STATE_DIR/certs/ca.crt"
