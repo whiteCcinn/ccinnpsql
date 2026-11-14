@@ -76,7 +76,7 @@ CREATE MATERIALIZED VIEW top_products AS SELECT product_id, sum(quantity) AS sol
 
 CREATE SEQUENCE invoice_numbers START 1000 INCREMENT 10 MAXVALUE 2000;
 SELECT setval('invoice_numbers', 1900);
-CREATE SEQUENCE ticket_numbers AS smallint;
+CREATE SEQUENCE ticket_numbers MAXVALUE 32767;
 
 INSERT INTO customers (email, name, country)
 SELECT 'user' || g || '@example.com', 'Customer ' || g, (ARRAY['MY','SG','JP','DE'])[1 + g % 4] FROM generate_series(1, 200) g;

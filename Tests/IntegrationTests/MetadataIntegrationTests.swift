@@ -189,7 +189,8 @@ struct MetadataIntegrationTests {
         #expect(settings.contains { $0.name == "shared_preload_libraries" && $0.setting?.contains("pg_stat_statements") == true })
         #expect(settings.first { $0.name == "shared_buffers" }?.displayValue == "32.0 MB")
         let roles = try await client.roles()
-        #expect(roles.contains { $0.name == "md5_user" && $0.memberOf.contains("pg_monitor") })
+        #expect(roles.contains { $0.name == "md5_user" })
+        if client.serverInfo.version.atLeast(10) { #expect(roles.contains { $0.name == "md5_user" && $0.memberOf.contains("pg_monitor") }) }
         let overview = try await client.overview()
         #expect((overview.uptimeSeconds ?? 0) > 0)
         #expect(overview.databases.contains { $0.name == "ccinn" })

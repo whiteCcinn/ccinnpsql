@@ -7,7 +7,7 @@
 # Every container is named ccinnpsql-it-pg<version>, listens on 127.0.0.1:154<NN> (9.6 → 15496,
 # 10 → 15410 … 18 → 15418), is capped at 256 MB and has TLS (self-signed test CA), pg_stat_statements,
 # and users for each authentication method:
-#   ccinn / ccinn          scram-sha-256 (superuser)       md5_user / md5pass     md5
+#   ccinn / ccinn          scram-sha-256 (md5 on 9.6)      md5_user / md5pass     md5
 #   trust_user             trust                           clear_user / clearpass password (clear text)
 #   tls_user / tlspass     scram-sha-256, hostssl only
 # Images come from the public ECR mirror of the Docker official images (no Docker Hub rate limit).
@@ -37,17 +37,33 @@ if [ ! -f "$STATE_DIR/certs/server.crt" ]; then
   )
 fi
 
-cat > "$STATE_DIR/init/pg_hba.conf" <<'HBA'
+write_init() { # <dir> <scram|md5>
+  local dir="$1" method="$2"
+  mkdir -p "$dir"
+  cat > "$dir/pg_hba.conf" <<HBA
 local   all  all                       trust
-hostssl all  tls_user    all           scram-sha-256
+hostssl all  tls_user    all           $method
 host    all  tls_user    all           reject
 host    all  trust_user  all           trust
 host    all  md5_user    all           md5
 host    all  clear_user  all           password
-host    all  all         all           scram-sha-256
+host    all  all         all           $method
 HBA
-
-cat > "$STATE_DIR/init/10-users.sh" <<'INIT'
+  if [ "$method" = "md5" ]; then
+    # PostgreSQL 9.6: no SCRAM; password_encryption is a boolean.
+    cat > "$dir/10-users.sh" <<'INIT'
+#!/bin/sh
+set -e
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+CREATE ROLE md5_user LOGIN PASSWORD 'md5pass';
+CREATE ROLE trust_user LOGIN;
+CREATE ROLE clear_user LOGIN PASSWORD 'clearpass';
+CREATE ROLE tls_user LOGIN PASSWORD 'tlspass';
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+SQL
+INIT
+  else
+    cat > "$dir/10-users.sh" <<'INIT'
 #!/bin/sh
 set -e
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
@@ -61,16 +77,22 @@ GRANT pg_monitor TO md5_user, trust_user, clear_user, tls_user;
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 SQL
 INIT
-chmod 755 "$STATE_DIR/init/10-users.sh"
+  fi
+  chmod 755 "$dir/10-users.sh"
+}
+write_init "$STATE_DIR/init" scram-sha-256
+write_init "$STATE_DIR/init-md5" md5
 
 for version in "${versions[@]}"; do
   name="ccinnpsql-it-pg${version//./}"
   port=$(port_for "$version")
+  init_dir="$STATE_DIR/init"; auth=scram-sha-256
+  if [ "$version" = "9.6" ]; then init_dir="$STATE_DIR/init-md5"; auth=md5; fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" --memory 256m -p "127.0.0.1:${port}:5432" \
     -e POSTGRES_USER=ccinn -e POSTGRES_PASSWORD=ccinn -e POSTGRES_DB=ccinn \
-    -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" \
-    -v "$STATE_DIR/certs:/certs:ro" -v "$STATE_DIR/init:/docker-entrypoint-initdb.d:ro" \
+    -e POSTGRES_INITDB_ARGS="--auth-host=$auth" \
+    -v "$STATE_DIR/certs:/certs:ro" -v "$init_dir:/docker-entrypoint-initdb.d:ro" \
     --entrypoint sh "$REGISTRY/postgres:${version}-alpine" -c '
       cp /certs/server.crt /certs/server.key /certs/ca.crt /tmp/ && chown postgres /tmp/server.* /tmp/ca.crt && chmod 600 /tmp/server.key
       cp /docker-entrypoint-initdb.d/pg_hba.conf /tmp/pg_hba.conf && chown postgres /tmp/pg_hba.conf
