@@ -295,7 +295,7 @@ private struct RelationRow: View {
                 Text("\(childCount) part\(childCount == 1 ? "" : "s")").font(.caption2).foregroundStyle(.tertiary)
             }
             Spacer(minLength: 4)
-            if let rows = relation.estimatedRows, rows > 0 {
+            if relation.kind != .sequence, let rows = relation.estimatedRows, rows > 0 {
                 Text(rows.formatted(.number.notation(.compactName))).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
             }
         }

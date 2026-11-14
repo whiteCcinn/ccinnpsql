@@ -155,6 +155,9 @@ public struct ExplainPlan: Sendable {
         let ordered = preferredDetailOrder.filter { remaining[$0] != nil } + remaining.keys.filter { !preferredDetailOrder.contains($0) }.sorted()
         for key in ordered {
             guard let value = remaining[key] else { continue }
+            // Zero buffer/IO counters (BUFFERS reports every kind) only add noise.
+            if key.hasSuffix("Blocks") || key.hasPrefix("I/O") || key.hasSuffix("Time") && key.contains("I/O"),
+               value.doubleValue == 0 { continue }
             details.append(PlanDetail(name: key, value: describe(value)))
         }
         let total = number("Actual Total Time")

@@ -198,12 +198,15 @@ final class SQLTabModel {
         let offset: Int?
         var hidden = false
         var plan = false
+        /// Characters the app prepended to the user's statement (EXPLAIN …), subtracted from error positions.
+        var prefixCharacters = 0
 
-        init(_ text: String, offset: Int? = nil, hidden: Bool = false, plan: Bool = false) {
+        init(_ text: String, offset: Int? = nil, hidden: Bool = false, plan: Bool = false, prefixCharacters: Int = 0) {
             self.text = text
             self.offset = offset
             self.hidden = hidden
             self.plan = plan
+            self.prefixCharacters = prefixCharacters
         }
     }
 
@@ -223,7 +226,9 @@ final class SQLTabModel {
             : SQLStatementSplitter.statement(at: selection.location, in: text) else { return }
         guard !isRunning else { return }
         var body = statement.text
+        var bodyOffset: Int? = statement.range.lowerBound + (selection.length > 0 ? selection.location : 0)
         if SQLStatementKind.of(body) == .explain {
+            bodyOffset = nil
             let analysis = SQLLexer(body)
             if let first = analysis.tokens().first(where: { $0.kind != .comment }) {
                 body = analysis.text(in: first.range.upperBound..<analysis.units.count).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -231,15 +236,17 @@ final class SQLTabModel {
         }
         let writes = SQLStatementKind.of(body).isMutation
         let explainSQL = ExplainPlan.statement(for: body, analyze: analyze, buffers: analyze)
+        let prefix = explainSQL.unicodeScalars.count - body.unicodeScalars.count
+        let explainStep = Step(explainSQL, offset: bodyOffset, plan: true, prefixCharacters: prefix)
         guard analyze, writes else {
-            run([Step(explainSQL, plan: true)])
+            run([explainStep])
             return
         }
         guard transactionStatus == .idle else {
             workspace.showToast("EXPLAIN ANALYZE of a data-modifying statement needs an idle session (finish the open transaction first).", isError: true)
             return
         }
-        run([Step("BEGIN", hidden: true), Step(explainSQL, plan: true), Step("ROLLBACK", hidden: true)],
+        run([Step("BEGIN", hidden: true), explainStep, Step("ROLLBACK", hidden: true)],
             confirmation: ("EXPLAIN ANALYZE executes the statement. It runs inside a transaction that is rolled back.", [body]), wrapped: true)
     }
 
@@ -351,9 +358,11 @@ final class SQLTabModel {
             outcome.notices = postgresError?.notices ?? []
             outcome.errorMessage = describe(error)
             historyEntry.errorMessage = outcome.errorMessage
-            if let offset, let position = postgresError?.position, position <= sql.unicodeScalars.count,
-               let range = SQLErrorLocator.highlightRange(in: executed, position: position) {
-                errorRange = NSRange(location: offset + range.lowerBound, length: range.count)
+            if let offset, let position = postgresError?.position.map({ $0 - step.prefixCharacters }), position >= 1 {
+                let source = step.prefixCharacters > 0 ? String(String.UnicodeScalarView(sql.unicodeScalars.dropFirst(step.prefixCharacters))) : executed
+                if position <= source.unicodeScalars.count, let range = SQLErrorLocator.highlightRange(in: source, position: position) {
+                    errorRange = NSRange(location: offset + range.lowerBound, length: range.count)
+                }
             }
         }
         transactionStatus = await session.transactionStatus

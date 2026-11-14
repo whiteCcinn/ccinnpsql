@@ -157,9 +157,12 @@ private struct PlanNodeRow: View {
     private var rowsText: String {
         if analyzed, let actual = node.actualRows {
             let loops = node.actualLoops ?? 1
-            return "\(Int(actual).formatted()) rows" + (loops > 1 ? " × \(Int(loops).formatted())" : "") + " · est \(Int(node.planRows ?? 0).formatted())"
+            let count = Int(actual)
+            return "\(count.formatted()) row\(count == 1 ? "" : "s")" + (loops > 1 ? " × \(Int(loops).formatted())" : "")
+                + " · est \(Int(node.planRows ?? 0).formatted())"
         }
-        return "est \(Int(node.planRows ?? 0).formatted()) rows"
+        let estimate = Int(node.planRows ?? 0)
+        return "est \(estimate.formatted()) row\(estimate == 1 ? "" : "s")"
     }
 
     private var barColor: Color { isSlowest ? .red : (share > 0.5 ? .orange : Theme.accent) }
