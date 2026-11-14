@@ -111,4 +111,7 @@ public enum SQLFunctions {
         ("pg_get_functiondef", "pg_get_functiondef(oid)"), ("to_tsvector", "to_tsvector([config,] text)"),
         ("to_tsquery", "to_tsquery([config,] text)"), ("ts_rank", "ts_rank(tsvector, tsquery)"),
     ].map { Function(name: $0.0, signature: $0.1) }
+
+    /// Upper-cased names, for highlighting calls.
+    public static let names: Set<String> = Set(all.map { $0.name.uppercased() })
 }
