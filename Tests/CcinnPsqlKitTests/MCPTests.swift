@@ -188,6 +188,17 @@ struct MCPProfileTests {
         #expect(write?.destructive == true)
     }
 
+    /// Review findings 1 and 3: the runner pins the string-literal rules the guard lexes with, and leaves no
+    /// session-level advisory lock on a pooled connection.
+    @Test func readOnlyRunnerPinsLexingAndCleansSessionState() {
+        let preamble = PostgresMCPTools.readOnlyPreamble(timeout: 30)
+        #expect(preamble.hasPrefix("BEGIN TRANSACTION READ ONLY;"))
+        #expect(preamble.contains("SET LOCAL statement_timeout = 30000"))
+        #expect(preamble.contains("SET LOCAL standard_conforming_strings = on"))
+        #expect(PostgresMCPTools.readOnlyEpilogue.hasPrefix("ROLLBACK;"))
+        #expect(PostgresMCPTools.readOnlyEpilogue.contains("pg_advisory_unlock_all()"))
+    }
+
     @Test func guardRejectsBeforeConnecting() async throws {
         let opened = OSAllocatedUnfairLock(initialState: 0)
         let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [Self.profiles[0]], defaultProfile: nil, forceReadOnly: false),

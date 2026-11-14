@@ -98,6 +98,10 @@ struct VersionTests {
         #expect(InsightSQL.columns(old).contains("''::text AS identity"))
         #expect(InsightSQL.columns(modern).contains("a.attgenerated"))
         #expect(InsightSQL.sequence(old).contains("NULL::bigint AS start_value"))
+        // Review finding 6: pg_range.rngmultitypid exists only on PostgreSQL 14+.
+        #expect(!InsightSQL.rangeSubtype(ServerVersion(major: 13)).contains("rngmultitypid"))
+        #expect(!InsightSQL.rangeSubtype(old).contains("rngmultitypid"))
+        #expect(InsightSQL.rangeSubtype(ServerVersion(major: 14)).contains("rngmultitypid"))
         #expect(CatalogSQL.hypertables(extensionVersion: "1.7.5").hasSuffix("timescaledb_information.hypertable"))
         #expect(CatalogSQL.hypertables(extensionVersion: "2.17.2").contains("timescaledb_information.hypertables"))
     }

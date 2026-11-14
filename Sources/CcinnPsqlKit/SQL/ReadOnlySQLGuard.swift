@@ -31,13 +31,20 @@ public enum ReadOnlySQLGuard {
         "pg_backup_start", "pg_backup_stop", "pg_start_backup", "pg_stop_backup", "pg_import_system_collations",
         "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema", "cursor_to_xml", "cursor_to_xmlschema",
         "pg_log_backend_memory_contexts", "pg_sync_replication_slots",
+        // Run a query passed as text (outside the guard's view): core text search and XML, tablefunc, xml2.
+        "ts_stat", "ts_rewrite", "crosstab", "crosstab2", "crosstab3", "crosstab4", "connectby", "xpath_table",
     ]
 
     /// Name prefixes of function families that write, signal, touch server files or execute SQL elsewhere.
     static let forbiddenPrefixes = [
         "pg_replication_origin_", "pg_stat_reset", "pg_create_", "pg_drop_", "pg_file_", "pg_ls_", "pg_read_", "lo_", "dblink",
         "pg_logical_", "pg_wal_replay_", "pg_xlog_replay_", "pg_advisory_", "pg_try_advisory_", "pg_backup_", "pg_switch_",
+        // Extensions that run SQL text in other sessions or on other nodes, or take SQL text as input.
+        "pg_background_", "run_command_on_", "pgr_",
     ]
+
+    /// How deep string literals are searched for embedded calls (`ts_stat('SELECT f(''…'')')`).
+    static let maxLiteralDepth = 4
 
     static func isForbiddenFunction(_ name: String) -> Bool {
         forbiddenFunctions.contains(name) || forbiddenPrefixes.contains { name.hasPrefix($0) }
@@ -99,7 +106,40 @@ public enum ReadOnlySQLGuard {
                 }
             }
         }
+        return embeddedCallRejection(in: analysis, depth: 1)
+    }
+
+    /// Text inside string literals can become SQL (functions that run a query given as text, user functions
+    /// with EXECUTE). Defense in depth: a literal that, read as SQL, calls a forbidden function is rejected.
+    private static func embeddedCallRejection(in analysis: StatementWords, depth: Int) -> String? {
+        guard depth <= maxLiteralDepth else { return "String literals are nested too deeply for a read-only query." }
+        for token in analysis.tokens where token.kind == .string {
+            let inner = StatementWords(literalBody(analysis.lexer.text(of: token)))
+            for index in inner.tokens.indices where inner.isPunctuation(index + 1, "(") {
+                let token = inner.tokens[index]
+                guard token.kind == .keyword || token.kind == .identifier || token.kind == .quotedIdentifier else { continue }
+                let name = inner.lexer.identifierValue(of: token)
+                if isForbiddenFunction(name) {
+                    return "A string literal contains a call to `\(name)()`, which is not allowed in read-only mode."
+                }
+            }
+            if let rejection = embeddedCallRejection(in: inner, depth: depth + 1) { return rejection }
+        }
         return nil
+    }
+
+    /// The characters between a literal's delimiters with doubled quotes undone (`E'…'`, `$tag$…$tag$`, `'…'`).
+    static func literalBody(_ literal: String) -> String {
+        var text = Substring(literal)
+        if text.first == "$", let close = text.dropFirst().firstIndex(of: "$") {
+            let tag = text[text.startIndex...close]
+            guard text.count >= tag.count * 2, text.hasSuffix(tag) else { return String(text.dropFirst(tag.count)) }
+            return String(text.dropFirst(tag.count).dropLast(tag.count))
+        }
+        guard let open = text.firstIndex(of: "'") else { return String(text) }
+        text = text[text.index(after: open)...]
+        if text.last == "'" { text = text.dropLast() }
+        return text.replacingOccurrences(of: "''", with: "'").replacingOccurrences(of: "\\'", with: "'")
     }
 
     private static func rejection(_ keyword: String) -> String {

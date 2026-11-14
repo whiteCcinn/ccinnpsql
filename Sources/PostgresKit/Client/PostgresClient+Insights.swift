@@ -93,6 +93,12 @@ public enum InsightSQL {
         """
     }
 
+    /// Subtype of a range type (or, on PostgreSQL 14+, of a multirange: `pg_range.rngmultitypid` is new in 14).
+    public static func rangeSubtype(_ version: ServerVersion) -> String {
+        let match = version.atLeast(14) ? "rngtypid = $1::oid OR rngmultitypid = $1::oid" : "rngtypid = $1::oid"
+        return "SELECT format_type(rngsubtype, NULL) AS base FROM pg_range WHERE \(match)"
+    }
+
     public static func sequence(_ version: ServerVersion) -> String {
         guard version.atLeast(10) else {
             return """
@@ -294,8 +300,7 @@ extension PostgresClient {
             return TypeDetail(summary: type, baseType: head?.text("base"), constraints: constraints, defaultExpression: head?.text("typdefault"),
                               isNotNull: head?.bool("typnotnull") ?? false)
         case .range, .multirange:
-            let base = try await records("SELECT format_type(rngsubtype, NULL) AS base FROM pg_range WHERE rngtypid = $1::oid OR rngmultitypid = $1::oid",
-                                         [oid], database: database).first?.text("base")
+            let base = try await records(InsightSQL.rangeSubtype(serverInfo.version), [oid], database: database).first?.text("base")
             return TypeDetail(summary: type, baseType: base)
         case .base:
             return TypeDetail(summary: type)

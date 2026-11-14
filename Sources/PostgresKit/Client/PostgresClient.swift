@@ -14,7 +14,8 @@ public final class PostgresClient: Sendable {
     private let tunnel: SSHTunnel?
     private let poolSize: Int
     private let pools: OSAllocatedUnfairLock<[String: ConnectionPool]>
-    private let typeNames = OSAllocatedUnfairLock<[UInt32: String]>(initialState: [:])
+    /// Type names by (database, OID); user types have per-database OIDs, built-in ones are shared.
+    private let typeNames = OSAllocatedUnfairLock<[TypeNameKey: String]>(initialState: [:])
     /// Pools kept open for databases other than the default one.
     static let maxPools = 6
 
@@ -40,9 +41,15 @@ public final class PostgresClient: Sendable {
         let effective = tunnel.map { configuration.with(endpoint: $0.localAddress) } ?? configuration
         let pool = Self.makePool(effective, poolSize: poolSize, transportFactory: transportFactory)
         do {
-            let info = try await pool.withConnection { connection in
-                try await ServerInfo.load(from: connection, override: poolingMode)
-            }
+            // A pooler can accept the login and then queue every query; bound the facts like any other statement.
+            let budget = Self.serverFactsTimeout(configuration)
+            let info = try await Deadline.run(seconds: budget, timeoutError: {
+                PostgresError(.timeout, "The server accepted the login but did not answer within \(Int(budget)) s (a connection pooler without a free server connection?)")
+            }, {
+                try await pool.withConnection { connection in
+                    try await ServerInfo.load(from: connection, override: poolingMode)
+                }
+            })
             return PostgresClient(configuration: configuration, effectiveConfiguration: effective, serverInfo: info, pool: pool,
                                   poolSize: poolSize, transportFactory: transportFactory, tunnel: tunnel)
         } catch {
@@ -50,6 +57,11 @@ public final class PostgresClient: Sendable {
             tunnel?.close()
             throw error
         }
+    }
+
+    /// Time allowed for loading server facts after the login: twice the connect timeout, at least 5 s.
+    static func serverFactsTimeout(_ configuration: ConnectionConfiguration) -> Double {
+        max(5, configuration.connectTimeout * 2)
     }
 
     private static func makePool(_ configuration: ConnectionConfiguration, poolSize: Int,
@@ -166,21 +178,40 @@ public final class PostgresClient: Sendable {
 
     // MARK: Type names
 
-    /// Fills in names of non-built-in column types (enums, domains, PostGIS types) from `pg_type`, cached per client.
-    public func resolvingTypeNames(_ result: QueryResult, database: String?) async throws -> QueryResult {
+    /// Fills in names of non-built-in column types (enums, domains, PostGIS types) from `pg_type`, cached per
+    /// database. Pass the connection that produced `result` when the caller already holds a pooled connection:
+    /// checking out a second one from the same (possibly one-connection) pool would wait for itself.
+    public func resolvingTypeNames(_ result: QueryResult, database: String?,
+                                   using connection: PostgresConnection? = nil) async throws -> QueryResult {
         let unknown = Set(result.results.flatMap(\.columns).filter { $0.typeName == nil }.map(\.typeOID))
         guard !unknown.isEmpty, !serverInfo.isPgBouncerConsole else { return result }
-        var known = typeNames.withLock { $0 }
+        let databaseName = database?.isEmpty == false ? database ?? defaultDatabase : effectiveConfiguration.database
+        var known: [UInt32: String] = typeNames.withLock { cache in
+            var cached: [UInt32: String] = [:]
+            for oid in unknown {
+                if let name = cache[TypeNameKey(oid: oid, database: databaseName)] { cached[oid] = name }
+            }
+            return cached
+        }
         let missing = unknown.filter { known[$0] == nil }
         if !missing.isEmpty {
-            let list = "{" + missing.map(String.init).joined(separator: ",") + "}"
-            if let rows = try? await records("SELECT oid::text AS oid, typname FROM pg_type WHERE oid = ANY($1::oid[])", [.text(list)],
-                                             database: database, timeout: 10) {
-                for row in rows {
-                    if let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let name = row.text("typname") { known[oid] = name }
+            let parameters: [BindValue] = [.text("{" + missing.sorted().map(String.init).joined(separator: ",") + "}")]
+            let rows: [Record]?
+            if let connection {
+                rows = try? await connection.extendedQuery(Self.typeNameSQL, parameters: parameters, limits: .metadata).records
+            } else {
+                rows = try? await records(Self.typeNameSQL, parameters, database: database, timeout: 10)
+            }
+            var found: [TypeNameKey: String] = [:]
+            for row in rows ?? [] {
+                if let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let name = row.text("typname") {
+                    known[oid] = name
+                    found[TypeNameKey(oid: oid, database: databaseName)] = name
                 }
-                let snapshot = known
-                typeNames.withLock { $0.merge(snapshot) { _, new in new } }
+            }
+            if !found.isEmpty {
+                let additions = found
+                typeNames.withLock { $0.merge(additions) { _, new in new } }
             }
         }
         var copy = result
@@ -192,5 +223,19 @@ public final class PostgresClient: Sendable {
             })
         }
         return copy
+    }
+
+    static let typeNameSQL = "SELECT oid::text AS oid, typname FROM pg_type WHERE oid = ANY($1::oid[])"
+}
+
+/// Cache key for type names: OIDs below `FirstNormalObjectId` (16384) are fixed at initdb and the same in every
+/// database; others are assigned per database.
+struct TypeNameKey: Hashable, Sendable {
+    let database: String
+    let oid: UInt32
+
+    init(oid: UInt32, database: String) {
+        self.oid = oid
+        self.database = oid < 16_384 ? "" : database
     }
 }

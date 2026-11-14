@@ -1,0 +1,98 @@
+import Foundation
+import os
+import Testing
+@testable import PostgresKit
+import PostgresWire
+
+/// Replies of a plain PostgreSQL 17 backend to the client's server-facts queries.
+enum FakeFacts {
+    static func reply(_ query: String, pid: Int32) -> FakePostgresServer.Reply? {
+        if query.contains("server_version_num") {
+            return .bytes(Wire.rows(["version", "num", "usr", "db", "in_recovery", "pid", "started_us", "server_addr", "server_port",
+                                     "superuser", "max_connections"],
+                                    [["PostgreSQL 17.2", "170002", "app", "app", "f", String(pid), "1700000000000000", "10.0.0.7", "5432",
+                                      "f", "100"]]))
+        }
+        if query.contains("pg_extension") { return .bytes(Wire.rows(["extname", "extversion", "nspname"], [])) }
+        if query == "SHOW pool_version" { return .bytes(Wire.error("42704", "unrecognized configuration parameter \"pool_version\"")) }
+        return nil
+    }
+}
+
+@Suite("Client with a fake server")
+struct ClientTests {
+    /// Review finding 10: a pooler that accepts the login but never answers must not hang `connect` forever.
+    @Test func serverFactsAreBoundedByADeadline() async throws {
+        let network = FakeNetwork { index in
+            FakePostgresServer(pid: Int32(100 + index)) { query in query.contains("server_version_num") ? .hang : .bytes(Wire.complete("SELECT 0")) }
+        }
+        var configuration = fakeConfiguration()
+        configuration.connectTimeout = 10
+        #expect(PostgresClient.serverFactsTimeout(configuration) == 20)
+        configuration.connectTimeout = 0.1
+        #expect(PostgresClient.serverFactsTimeout(configuration) == 5)
+        let started = ContinuousClock.now
+        do {
+            _ = try await Deadline.run(seconds: 30, timeoutError: { PostgresError(.timeout, "test watchdog") }) { [configuration] in
+                try await PostgresClient.connect(configuration, transportFactory: network.factory)
+            }
+            Issue.record("connect succeeded without server facts")
+        } catch let error as PostgresError {
+            #expect(error.kind == .timeout)
+            #expect(error.message != "test watchdog", "the client's own deadline did not fire")
+        }
+        #expect(ContinuousClock.now - started < .seconds(15))
+    }
+
+    /// Server errors from optional probes mean "not supported"; anything else must surface.
+    @Test func probesSwallowOnlyServerErrors() async throws {
+        let rejected: Int? = try await ServerInfo.probe { throw PostgresError(.server, "unrecognized configuration parameter") }
+        #expect(rejected == nil)
+        await #expect(throws: PostgresError.self) {
+            let _: Int? = try await ServerInfo.probe { throw PostgresError(.timeout, "timed out") }
+        }
+        await #expect(throws: PostgresError.self) {
+            let _: Int? = try await ServerInfo.probe { throw PostgresError(.connectionClosed, "closed") }
+        }
+    }
+
+    /// Review finding 2: resolving type names while holding the only connection of a pool must not wait for a
+    /// second connection; names are cached per database because user-type OIDs are per database.
+    @Test func typeNamesResolveOnTheHeldConnectionAndPerDatabase() async throws {
+        let network = FakeNetwork { index in
+            let pid = Int32(100 + index)
+            return FakePostgresServer(pid: pid) { query in
+                if let reply = FakeFacts.reply(query, pid: pid) { return reply }
+                if query == "SELECT e" { return .bytes(Wire.rowDescription(["e"], type: 70_000) + Wire.dataRow(["happy"]) + Wire.complete("SELECT 1")) }
+                if query.contains("FROM pg_type") {
+                    // Connection 1 serves database "other", connection 2 database "third": same OID, different types.
+                    return .bytes(Wire.rows(["oid", "typname"], [["70000", index == 1 ? "mood" : "colour"]]))
+                }
+                return .bytes(Wire.complete("SELECT 0"))
+            }
+        }
+        // poolSize 2 → pools for other databases hold a single connection.
+        let client = try await PostgresClient.connect(fakeConfiguration(), poolSize: 2, transportFactory: network.factory)
+        defer { Task { await client.close() } }
+        func resolve(_ database: String) async throws -> String? {
+            try await Deadline.run(seconds: 5, timeoutError: { PostgresError(.timeout, "type-name lookup waited for a second connection") }) {
+                try await client.withConnection(database: database) { connection in
+                    let result = try await connection.extendedQuery("SELECT e")
+                    return try await client.resolvingTypeNames(result, database: database, using: connection).lastRowSet?.columns.first?.typeName
+                }
+            }
+        }
+        #expect(try await resolve("other") == "mood")
+        #expect(try await resolve("third") == "colour")
+        // Cached: a second lookup in "other" sends no pg_type query and keeps that database's name.
+        let lookupsBefore = network.servers.withLock { $0 }.flatMap(\.queries).filter { $0.contains("FROM pg_type") }.count
+        #expect(try await resolve("other") == "mood")
+        let lookupsAfter = network.servers.withLock { $0 }.flatMap(\.queries).filter { $0.contains("FROM pg_type") }.count
+        #expect(lookupsAfter == lookupsBefore)
+    }
+
+    @Test func builtInTypeOIDsShareOneCacheEntry() {
+        #expect(TypeNameKey(oid: 25, database: "a") == TypeNameKey(oid: 25, database: "b"))
+        #expect(TypeNameKey(oid: 16_384, database: "a") != TypeNameKey(oid: 16_384, database: "b"))
+    }
+}

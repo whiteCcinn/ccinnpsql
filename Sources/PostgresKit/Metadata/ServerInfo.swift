@@ -206,19 +206,19 @@ public struct ServerInfo: Sendable {
             NodeFingerprint(postmasterStartMicros: $0, serverAddress: facts.text("server_addr") ?? "",
                             serverPort: Int(clamping: facts.int("server_port") ?? 0))
         }
-        let extensions = (try? await Self.extensions(on: connection)) ?? []
+        let extensions = try await probe { try await Self.extensions(on: connection) } ?? []
 
         // Pooler detection (design D8).
         var pooler: PoolerKind = .none
         var detectedMode: PoolingMode = .direct
         var detail = "Direct connection (the backend pid matches the session key)"
-        if let poolVersion = try? await connection.simpleQuery("SHOW pool_version").lastRowSet?.scalar, !poolVersion.isEmpty {
+        if let poolVersion = try await probe({ try await connection.simpleQuery("SHOW pool_version").lastRowSet?.scalar }), !poolVersion.isEmpty {
             pooler = .pgpool(version: poolVersion)
             detectedMode = .session
             detail = "Pgpool-II detected (SHOW pool_version)"
         } else if let pid = facts.int("pid"), let key = connection.backendKey, Int64(key.processID) != pid {
             pooler = .pooler
-            let second = try? await connection.extendedQuery("SELECT pg_backend_pid()").lastRowSet?.scalar.flatMap { Int64($0) }
+            let second = try await probe { try await connection.extendedQuery("SELECT pg_backend_pid()").lastRowSet?.scalar.flatMap { Int64($0) } }
             if let second, second != pid {
                 detectedMode = .transaction
                 detail = "Pooler detected; consecutive transactions ran on different backends (transaction pooling)"
@@ -239,6 +239,16 @@ public struct ServerInfo: Sendable {
                           isSuperuser: facts.bool("superuser") ?? false, isInRecovery: facts.bool("in_recovery") ?? false, node: node,
                           extensions: extensions, pooler: pooler, poolingMode: mode, poolingDetail: detail,
                           maxConnections: facts.int("max_connections").map { Int(clamping: $0) }, tlsDescription: connection.tlsDescription)
+    }
+
+    /// An optional probe: `nil` when the server rejects the statement (unknown parameter, missing privilege);
+    /// timeouts, cancellation and connection failures propagate instead of being mistaken for "not supported".
+    static func probe<T>(_ body: () async throws -> T?) async throws -> T? {
+        do {
+            return try await body()
+        } catch let error as PostgresError where error.kind == .server {
+            return nil
+        }
     }
 
     static func extensions(on connection: PostgresConnection) async throws -> [InstalledExtension] {

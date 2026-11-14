@@ -537,19 +537,29 @@ public struct PostgresMCPTools: MCPToolProvider {
         }
         return try await client.withConnection(database: database) { connection in
             try await Deadline.run(seconds: timeout, timeoutError: timeoutError(timeout)) {
-                _ = try await connection.simpleQuery(client.routingPrefix
-                    + "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout = \(Int(timeout * 1000))", limits: .metadata)
+                _ = try await connection.simpleQuery(client.routingPrefix + readOnlyPreamble(timeout: timeout), limits: .metadata)
                 do {
                     let result = try await connection.extendedQuery(sql, limits: limits)
-                    _ = try? await connection.simpleQuery("ROLLBACK")
-                    return try await client.resolvingTypeNames(result, database: database)
+                    _ = try? await connection.simpleQuery(client.routingPrefix + readOnlyEpilogue, limits: .metadata)
+                    // Same connection: a second checkout could wait forever on a one-connection pool.
+                    return try await client.resolvingTypeNames(result, database: database, using: connection)
                 } catch {
-                    _ = try? await connection.simpleQuery("ROLLBACK")
+                    _ = try? await connection.simpleQuery(client.routingPrefix + readOnlyEpilogue, limits: .metadata)
                     throw error
                 }
             }
         }
     }
+
+    /// Opens the read-only transaction. `standard_conforming_strings` is pinned because the guard lexes plain
+    /// strings without backslash escapes; with it off on the server, `'\''` would hide SQL from the guard.
+    static func readOnlyPreamble(timeout: Double) -> String {
+        "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout = \(Int(timeout * 1000)); SET LOCAL standard_conforming_strings = on"
+    }
+
+    /// Ends the read-only transaction and drops session-level advisory locks, the one piece of state a ROLLBACK
+    /// keeps, so a pooled connection never carries a lock taken by a function the guard cannot see into.
+    static let readOnlyEpilogue = "ROLLBACK; SELECT pg_advisory_unlock_all()"
 
     // MARK: Encoding
 

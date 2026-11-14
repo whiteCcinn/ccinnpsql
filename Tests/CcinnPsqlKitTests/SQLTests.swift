@@ -192,6 +192,9 @@ struct ReadOnlyGuardTests {
         "SELECT \"update\" FROM t",
         "SELECT pg_sleep(1)",
         "SELECT count(*) FROM pg_stat_activity",
+        "SELECT to_tsvector('english', 'the delete key') @@ to_tsquery('delete')",
+        "SELECT 'note: call support(now)' AS text",
+        "SELECT $q$SELECT lower('x')$q$ AS sql",
     ])
     func allows(sql: String) {
         #expect(ReadOnlySQLGuard.check(sql) == nil, "\(sql)")
@@ -257,6 +260,19 @@ struct ReadOnlyGuardTests {
         "PREPARE q AS SELECT 1",
         "",
         "-- just a comment",
+        // Review finding 1: functions that run SQL given as text, and calls hidden inside literals.
+        "SELECT * FROM ts_stat($q$SELECT to_tsvector(pg_terminate_backend(pid)::text) FROM pg_stat_activity$q$)",
+        "SELECT * FROM ts_stat('SELECT to_tsvector(pg_advisory_lock(424242)::text)')",
+        "SELECT * FROM pg_catalog.ts_stat('SELECT to_tsvector(''x'')')",
+        "SELECT ts_rewrite('a'::tsquery, 'SELECT ''a''::tsquery, ''b''::tsquery')",
+        "SELECT * FROM crosstab('SELECT 1, 2, 3') AS t(a int, b int)",
+        "SELECT * FROM run_command_on_workers('SELECT pg_reload_conf()')",
+        "SELECT pg_background_launch('VACUUM')",
+        "SELECT my_exec('SELECT pg_terminate_backend(1)')",
+        "SELECT my_exec($$SELECT pg_catalog.pg_reload_conf ()$$)",
+        "SELECT my_exec(E'SELECT pg_notify(\\'c\\', \\'x\\')')",
+        "SELECT my_exec('SELECT f(''SELECT \"pg_read_file\"(/etc/passwd)'')')",
+        "SELECT pg_reload_conf/**/()",
     ])
     func rejects(sql: String) {
         #expect(ReadOnlySQLGuard.check(sql) != nil, "\(sql)")
