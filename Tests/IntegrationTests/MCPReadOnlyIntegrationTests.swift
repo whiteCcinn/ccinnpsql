@@ -83,6 +83,9 @@ struct MCPReadOnlyIntegrationTests {
         #expect(try await client.records("SELECT count(*) AS n FROM pg_replication_slots WHERE slot_name LIKE 'ccinnpsql_mcp%'").first?.int("n") == 0)
         if client.serverInfo.version.atLeast(10) {
             #expect(try await client.records("SELECT count(*) AS n FROM pg_replication_origin WHERE roname LIKE 'ccinnpsql_mcp%'").first?.int("n") == 0)
+        }
+        if client.serverInfo.version.atLeast(11) {
+            // Absolute paths in pg_stat_file need PostgreSQL 11+.
             let file = try await client.records("SELECT pg_stat_file('/tmp/ccinnpsql_mcp_pwned', true) IS NULL AS absent").first?.bool("absent")
             #expect(file == true, "a server-side file was written")
         }
