@@ -211,7 +211,13 @@ struct MetadataIntegrationTests {
         _ = try await session.run("BEGIN")
         _ = try await session.run("SET statement_timeout = '5s'")
         _ = try await session.run("ROLLBACK")
-        #expect(await session.replayedSettings == ["SET search_path TO shop, public", "SET application_name = 'it-session'"])
+        // Review finding 9: scripts are tracked statement by statement (rolled-back settings are not replayed).
+        _ = try await session.run("BEGIN; SET work_mem = '8MB'; ROLLBACK", mode: .simple)
+        _ = try await session.run("BEGIN; SET lock_timeout = '3s'; SAVEPOINT s; SET work_mem = '9MB'; ROLLBACK TO SAVEPOINT s; COMMIT", mode: .simple)
+        await #expect(throws: PostgresError.self) { _ = try await session.run("SET work_mem = '10MB'; SELECT 1/0", mode: .simple) }
+        #expect(try await session.run("SHOW work_mem").lastRowSet?.scalar != "10MB")
+        #expect(await session.replayedSettings == ["SET search_path TO shop, public", "SET application_name = 'it-session'",
+                                                   "SET lock_timeout = '3s'"])
         // Kill the session's backend: the next statement reconnects and replays the settings.
         let pid = try #require(await session.backendProcessID)
         let snapshot = try await client.activity()
@@ -222,6 +228,8 @@ struct MetadataIntegrationTests {
         #expect(path == "shop, public")
         #expect(try await session.run("SELECT count(*) FROM customers").lastRowSet?.scalar == "200")
         #expect(try await session.run("SHOW statement_timeout").lastRowSet?.scalar == "0")
+        #expect(try await session.run("SHOW lock_timeout").lastRowSet?.scalar == "3s")
+        #expect(try await session.run("SHOW work_mem").lastRowSet?.scalar == "4MB")
         await session.close()
 
         let listener = try await PostgresListener.open(client: client)

@@ -79,6 +79,8 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
         /// Answers after a delay unless a cancel arrives first (then 57014). A cancel arriving while the server is
         /// idle is ignored, as PostgreSQL does.
         case delayed([UInt8], seconds: Double)
+        /// Sends the bytes (e.g. some rows), then keeps the statement running until cancelled (then 57014).
+        case partialThenHang([UInt8])
     }
 
     private struct State {
@@ -250,6 +252,9 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
         case .hang:
             state.withLockUnchecked { $0.hanging = true }
             if extended { enqueue(Wire.message("1") + Wire.message("2")) }
+        case let .partialThenHang(bytes):
+            state.withLockUnchecked { $0.hanging = true }
+            enqueue((extended ? Wire.message("1") + Wire.message("2") : []) + bytes)
         case let .delayed(bytes, seconds):
             let generation = state.withLockUnchecked { state -> Int in
                 state.hanging = true

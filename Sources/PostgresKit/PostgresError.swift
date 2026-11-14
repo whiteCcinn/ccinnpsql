@@ -26,6 +26,8 @@ public struct PostgresError: Error, LocalizedError, Sendable, Equatable, CustomS
     public let fields: ServerMessageFields?
     /// Notices the server sent before the error (e.g. `RAISE NOTICE` before an exception).
     public internal(set) var notices: [ServerMessageFields]
+    /// Statements of a simple-protocol batch that completed before the failure (statements after it did not run).
+    public internal(set) var completedStatements = 0
 
     public init(_ kind: Kind, _ message: String, fields: ServerMessageFields? = nil, notices: [ServerMessageFields] = []) {
         self.kind = kind

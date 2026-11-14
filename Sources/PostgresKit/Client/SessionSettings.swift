@@ -1,4 +1,5 @@
 import Foundation
+import PostgresWire
 
 /// Classifies statements that change session state, so a session can replay them after a reconnect.
 public enum SessionSettingChange: Equatable, Sendable {
@@ -8,9 +9,14 @@ public enum SessionSettingChange: Equatable, Sendable {
     case reset(name: String)
     /// `RESET ALL`, `DISCARD ALL`, `RESET SESSION AUTHORIZATION` and friends.
     case resetAll
-    /// A transaction boundary that decides whether pending settings stick.
-    case commit
-    case rollback
+    /// Transaction control that decides whether pending settings stick. `chain`: `AND CHAIN` opens the next
+    /// transaction at once.
+    case begin
+    case commit(chain: Bool)
+    case rollback(chain: Bool)
+    case savepoint(String)
+    case rollbackToSavepoint(String)
+    case releaseSavepoint(String)
 
     /// Recognises one statement (comments and trailing semicolons allowed). `nil` for everything else,
     /// including transaction-scoped `SET LOCAL`, `SET TRANSACTION` and `SET CONSTRAINTS`.
@@ -19,7 +25,7 @@ public enum SessionSettingChange: Equatable, Sendable {
         var body = Substring(text)
         while body.hasSuffix(";") { body = body.dropLast() }
         body = body.trimmingSuffixWhitespace()
-        let words = body.split(whereSeparator: \.isWhitespace).prefix(4).map { $0.lowercased() }
+        let words = body.split(whereSeparator: \.isWhitespace).prefix(6).map { $0.lowercased() }
         guard let first = words.first else { return nil }
         let statement = String(body)
         switch first {
@@ -52,11 +58,29 @@ public enum SessionSettingChange: Equatable, Sendable {
             return .reset(name: words[1])
         case "discard":
             return words.count >= 2 && words[1] == "all" ? .resetAll : nil
+        case "begin", "start":
+            return first == "start" && (words.count < 2 || words[1] != "transaction") ? nil : .begin
         case "commit", "end":
-            return .commit
+            // COMMIT PREPARED finishes a prepared transaction, not the session's.
+            if words.count >= 2, words[1] == "prepared" { return nil }
+            return .commit(chain: Self.chains(words))
+        case "prepare":
+            // PREPARE TRANSACTION keeps the session's settings like a commit does.
+            return words.count >= 2 && words[1] == "transaction" ? .commit(chain: false) : nil
         case "rollback", "abort":
-            // ROLLBACK TO SAVEPOINT keeps the transaction open.
-            return words.count >= 2 && (words[1] == "to" || (words.count >= 3 && words[2] == "to")) ? nil : .rollback
+            if words.count >= 2, words[1] == "prepared" { return nil }
+            if let to = words.firstIndex(of: "to") {
+                var nameIndex = to + 1
+                if nameIndex < words.count, words[nameIndex] == "savepoint" { nameIndex += 1 }
+                return nameIndex < words.count ? .rollbackToSavepoint(Self.savepointName(words[nameIndex])) : nil
+            }
+            return .rollback(chain: Self.chains(words))
+        case "savepoint":
+            return words.count >= 2 ? .savepoint(Self.savepointName(words[1])) : nil
+        case "release":
+            guard words.count >= 2 else { return nil }
+            let name = words[1] == "savepoint" && words.count >= 3 ? words[2] : words[1]
+            return .releaseSavepoint(Self.savepointName(name))
         case "select":
             // SELECT set_config('name', 'value', false) — session scoped.
             let lowered = statement.lowercased()
@@ -68,6 +92,15 @@ public enum SessionSettingChange: Equatable, Sendable {
         default:
             return nil
         }
+    }
+
+    private static func chains(_ words: [String]) -> Bool {
+        guard let index = words.firstIndex(of: "chain"), index > 0 else { return false }
+        return words[index - 1] == "and"
+    }
+
+    private static func savepointName(_ word: String) -> String {
+        word.trimmingCharacters(in: CharacterSet(charactersIn: "\";"))
     }
 
     static func strippingLeadingComments(_ sql: String) -> String {
@@ -86,39 +119,107 @@ public enum SessionSettingChange: Equatable, Sendable {
     }
 }
 
-/// Session settings that a reconnect replays, honouring transactions: settings made inside a transaction only
-/// stick when it commits (PostgreSQL reverts them on rollback).
+/// Session settings that a reconnect replays, honouring transactions the way PostgreSQL does: settings made inside
+/// a transaction stick only when it commits, `ROLLBACK TO SAVEPOINT` drops those made after the savepoint, and in
+/// a simple-protocol batch the statements outside an explicit block form one implicit transaction that a later
+/// error (or a cancel) rolls back.
 public struct SessionSettingsLog: Sendable, Equatable {
     public private(set) var committed: [(name: String, statement: String)] = []
-    private var pending: [SessionSettingChange] = []
+    /// Changes inside the open explicit transaction, with savepoint markers.
+    private var pending: [PendingEntry] = []
+    private var inTransaction = false
+    /// The open transaction failed: COMMIT will roll it back unless ROLLBACK TO SAVEPOINT recovers it.
+    private var aborted = false
     public static let maxSettings = 64
+
+    private enum PendingEntry: Equatable, Sendable {
+        case change(SessionSettingChange)
+        case savepoint(String)
+    }
 
     public init() {}
 
     public static func == (lhs: SessionSettingsLog, rhs: SessionSettingsLog) -> Bool {
         lhs.committed.map(\.statement) == rhs.committed.map(\.statement) && lhs.pending == rhs.pending
+            && lhs.inTransaction == rhs.inTransaction && lhs.aborted == rhs.aborted
     }
 
-    /// Records a successfully executed statement. `inTransaction` is the status after it ran.
-    public mutating func record(_ sql: String, inTransaction: Bool) {
-        guard let change = SessionSettingChange.parse(sql) else {
-            if !inTransaction { pending.removeAll() }
-            return
+    /// Records one sent message. `statements` are its statements in order, `completed` how many finished
+    /// (CommandComplete), `failed` whether the message ended in an error or a cancel, `finalStatus` the
+    /// transaction status the server reported at ReadyForQuery (authoritative when it disagrees).
+    public mutating func recordBatch(_ statements: [String], completed: Int, failed: Bool, finalStatus: TransactionStatus) {
+        var implicit: [SessionSettingChange] = []
+        for statement in statements.prefix(max(0, completed)) {
+            guard let change = SessionSettingChange.parse(statement) else { continue }
+            switch change {
+            case .begin:
+                guard !inTransaction else { continue }
+                // BEGIN turns the batch's implicit block into the explicit transaction.
+                inTransaction = true
+                aborted = false
+                pending = implicit.map(PendingEntry.change)
+                implicit.removeAll()
+            case let .commit(chain):
+                if !aborted {
+                    for entry in pending { if case let .change(change) = entry { apply(change) } }
+                    for change in implicit { apply(change) }
+                }
+                endTransaction(chain: chain)
+                implicit.removeAll()
+            case let .rollback(chain):
+                endTransaction(chain: chain)
+                implicit.removeAll()
+            case let .savepoint(name):
+                if inTransaction { pending.append(.savepoint(name)) }
+            case let .rollbackToSavepoint(name):
+                if inTransaction, let marker = pending.lastIndex(of: .savepoint(name)) {
+                    pending.removeSubrange((marker + 1)...)
+                    aborted = false
+                }
+            case let .releaseSavepoint(name):
+                if inTransaction, let marker = pending.lastIndex(of: .savepoint(name)) {
+                    // Releasing keeps the changes and drops this and every later savepoint.
+                    let later = pending[(marker + 1)...].filter { if case .change = $0 { true } else { false } }
+                    pending = Array(pending[..<marker]) + later
+                }
+            case .set, .reset, .resetAll:
+                if inTransaction { pending.append(.change(change)) } else { implicit.append(change) }
+            }
         }
-        switch change {
-        case .commit:
-            for change in pending { apply(change) }
-            pending.removeAll()
-        case .rollback:
-            pending.removeAll()
+        if failed {
+            // The implicit block was rolled back; an explicit transaction is now aborted.
+            if inTransaction { aborted = true }
+        } else {
+            for change in implicit { apply(change) }
+        }
+        switch finalStatus {
+        case .idle where inTransaction:
+            // Ended by something not parsed here (a procedure's COMMIT, a FATAL): replay nothing from it.
+            endTransaction(chain: false)
+        case .inTransaction where !inTransaction:
+            inTransaction = true
+        case .failedTransaction:
+            inTransaction = true
+            aborted = true
         default:
-            if inTransaction { pending.append(change) } else { apply(change) }
+            break
         }
     }
 
-    /// The transaction failed or was rolled back by the server (e.g. the connection dropped).
+    /// One statement that ran on its own. `inTransaction` is the status after it ran.
+    public mutating func record(_ sql: String, inTransaction: Bool) {
+        recordBatch([sql], completed: 1, failed: false, finalStatus: inTransaction ? .inTransaction : .idle)
+    }
+
+    /// The connection was lost: the server rolled back whatever transaction was open.
     public mutating func discardPending() {
+        endTransaction(chain: false)
+    }
+
+    private mutating func endTransaction(chain: Bool) {
         pending.removeAll()
+        aborted = false
+        inTransaction = chain
     }
 
     private mutating func apply(_ change: SessionSettingChange) {
@@ -131,7 +232,7 @@ public struct SessionSettingsLog: Sendable, Equatable {
             committed.removeAll { $0.name == name }
         case .resetAll:
             committed.removeAll()
-        case .commit, .rollback:
+        case .begin, .commit, .rollback, .savepoint, .rollbackToSavepoint, .releaseSavepoint:
             break
         }
     }

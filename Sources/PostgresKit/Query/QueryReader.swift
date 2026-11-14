@@ -12,6 +12,8 @@ struct QueryReader {
 
     static let maxNotices = 1_000
     static let maxNotifications = 10_000
+    /// Rows still accepted (and discarded) after a row-limit cancel was sent.
+    static let rowsAfterCancel = 10_000_000
 
     private var results: [ResultSet] = []
     private var notices: [ServerMessageFields] = []
@@ -20,6 +22,11 @@ struct QueryReader {
     private var serverError: ServerMessageFields?
     private var sinkError: (any Error)?
     private var transactionStatus: TransactionStatus = .idle
+    private var completedStatements = 0
+    /// When rows past the limit started to be skipped (bounds the drain by `drainSeconds`).
+    private var drainStarted: ContinuousClock.Instant?
+    private var cancelledForLimit = false
+    private var limitCancelLanded = false
 
     // Row set being read.
     private var columns: [ColumnDescription]?
@@ -88,10 +95,26 @@ struct QueryReader {
         if let sinkError { throw sinkError }
         if let serverError {
             throw QueryFailure(error: PostgresError.server(serverError), transactionStatus: transactionStatus,
-                               parameters: parameterChanges, notices: notices)
+                               parameters: parameterChanges, notices: notices, completedStatements: completedStatements)
         }
+        var notices = notices
+        if limitCancelLanded { notices.append(limitCancelWarning()) }
         return QueryResult(results: results, notices: notices, notifications: notifications, transactionStatus: transactionStatus,
-                           parameterChanges: parameterChanges)
+                           parameterChanges: parameterChanges, completedStatements: completedStatements, cancelledAtRowLimit: limitCancelLanded)
+    }
+
+    /// Says truthfully what the cancel did: it is never a harmless truncation.
+    private func limitCancelWarning() -> ServerMessageFields {
+        let consequence = if transactionStatus == .failedTransaction {
+            "the open transaction is now aborted; run ROLLBACK."
+        } else if extended {
+            "anything it changed was rolled back."
+        } else {
+            "the batch stopped at this statement and everything it had not committed was rolled back."
+        }
+        let message = "The result was cut at the row limit, and skipping the remaining rows took too long, so the statement was cancelled: "
+            + consequence
+        return ServerMessageFields(fields: [UInt8(ascii: "S"): "WARNING", UInt8(ascii: "V"): "WARNING", UInt8(ascii: "M"): message])
     }
 
     private mutating func readUntilReadyRaw(_ channel: inout MessageChannel) async throws {
@@ -112,6 +135,7 @@ struct QueryReader {
                     pendingFields = nil
                 }
             case let .commandComplete(tag):
+                completedStatements += 1
                 finishRowSet(tag: CommandTag(tag))
             case .portalSuspended:
                 // Execute's row count was reached: more rows may exist.
@@ -123,11 +147,11 @@ struct QueryReader {
                 continue
             case let .errorResponse(fields):
                 if fields.sqlState == "57014", run.cancellation == .rowLimit {
-                    // We stopped the statement ourselves after the row limit: not an error.
+                    // We stopped the statement ourselves after draining for too long: the rows are kept, and
+                    // `finish()` reports what the server rolled back.
                     truncated = true
+                    limitCancelLanded = true
                     finishRowSet(tag: nil)
-                    appendNotice(ServerMessageFields(fields: [UInt8(ascii: "S"): "NOTICE", UInt8(ascii: "M"):
-                        "The result was cut at the row limit; the server stopped the statement (later statements in the batch were not run)."]))
                 } else if serverError == nil {
                     serverError = fields
                 }
@@ -190,15 +214,9 @@ struct QueryReader {
     private mutating func appendRow(_ payload: ArraySlice<UInt8>, channel: inout MessageChannel) throws {
         guard let columns else { throw PostgresError(.protocolViolation, "DataRow without RowDescription") }
         if truncated || rows.count >= limits.maxRows || keptBytes + payload.count > limits.maxBytes {
-            if !truncated {
-                truncated = true
-                // Extended queries are bounded by Execute's row count; the simple protocol needs a cancel.
-                if !extended || keptBytes + payload.count > limits.maxBytes { run.cancelForRowLimit() }
-            }
+            truncated = true
             discarded += 1
-            if discarded > limits.drainRows, !extended {
-                throw PostgresError(.protocolViolation, "The server kept sending rows after the statement was cancelled")
-            }
+            try skipOrCancel()
             return
         }
         let cells = try DataRow.cells(payload)
@@ -237,12 +255,31 @@ struct QueryReader {
         guard columns != nil else { return }
         var line = payload
         if line.last == 0x0A { line = line.dropLast() }
-        if rows.count < limits.maxRows, keptBytes + line.count <= limits.maxBytes {
+        if !truncated, rows.count < limits.maxRows, keptBytes + line.count <= limits.maxBytes {
             rows.append([String(decoding: line, as: UTF8.self)])
             keptBytes += line.count
-        } else if !truncated {
+        } else {
             truncated = true
+            discarded += 1
+            try skipOrCancel()
+        }
+    }
+
+    /// Rows past the limit are skipped, not cancelled: a cancel aborts the statement's transaction (and, in a
+    /// simple-protocol batch, everything the batch has not committed). Only a drain that exceeds its row or time
+    /// budget is cancelled; a server that keeps sending far beyond that is dropped.
+    private mutating func skipOrCancel() throws {
+        let now = ContinuousClock.now
+        let started = drainStarted ?? now
+        drainStarted = started
+        if !cancelledForLimit, discarded > limits.drainRows || now - started > .milliseconds(Int(limits.drainSeconds * 1000)) {
+            cancelledForLimit = true
             run.cancelForRowLimit()
+        }
+        // After the cancel the server stops within its latency; the cancel's grace period closes the socket of
+        // one that does not. This cap only guards against a server streaming rows faster than that forever.
+        if discarded > limits.drainRows + Self.rowsAfterCancel {
+            throw PostgresError(.protocolViolation, "The server kept sending rows after the statement was cancelled")
         }
     }
 

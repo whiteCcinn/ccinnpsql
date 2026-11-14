@@ -205,9 +205,36 @@ struct ConnectionIntegrationTests {
         #expect(extended.lastRowSet?.isTruncated == true)
         let exact = try await connection.extendedQuery("SELECT g FROM generate_series(1, 10) g", limits: RowLimits(maxRows: 10))
         #expect(exact.lastRowSet?.isTruncated == false)
-        let simple = try await connection.simpleQuery("SELECT g FROM generate_series(1, 5000000) g", limits: RowLimits(maxRows: 100))
-        #expect(simple.lastRowSet?.rows.count == 100)
-        #expect(simple.lastRowSet?.isTruncated == true)
+        // Review finding 5: past the limit rows are skipped, so the rest of the batch runs and commits.
+        let simple = try await connection.simpleQuery("""
+            CREATE TEMP TABLE kept(x int); INSERT INTO kept VALUES (1);
+            SELECT g FROM generate_series(1, 200000) g;
+            INSERT INTO kept VALUES (2)
+            """, limits: RowLimits(maxRows: 100))
+        #expect(simple.results[2].rows.count == 100)
+        #expect(simple.results[2].isTruncated == true)
+        #expect(simple.completedStatements == 4)
+        #expect(!simple.cancelledAtRowLimit)
+        #expect(try await connection.extendedQuery("SELECT count(*) FROM kept").lastRowSet?.scalar == "2")
+
+        // A drain over budget is cancelled, and the result says the batch's uncommitted work was rolled back.
+        let cancelled = try await connection.simpleQuery("""
+            CREATE TEMP TABLE rolled(x int); INSERT INTO rolled VALUES (1);
+            SELECT g FROM generate_series(1, 5000000) g
+            """, limits: RowLimits(maxRows: 100, drainRows: 1_000))
+        #expect(cancelled.cancelledAtRowLimit)
+        #expect(cancelled.lastRowSet?.rows.count == 100)
+        #expect(cancelled.notices.last?.severity == "WARNING")
+        #expect(cancelled.notices.last?.message.contains("rolled back") == true)
+        #expect(try await connection.extendedQuery("SELECT to_regclass('pg_temp.rolled') IS NULL").lastRowSet?.scalar == "t")
+
+        // Inside an explicit transaction the cancel aborts it, and the warning says so.
+        _ = try await connection.simpleQuery("BEGIN")
+        let aborted = try await connection.simpleQuery("SELECT g FROM generate_series(1, 5000000) g", limits: RowLimits(maxRows: 10, drainRows: 1_000))
+        #expect(aborted.transactionStatus == .failedTransaction)
+        #expect(aborted.notices.last?.message.contains("ROLLBACK") == true)
+        _ = try await connection.simpleQuery("ROLLBACK")
+
         #expect(await connection.isBroken == false)
         #expect(try await connection.extendedQuery("SELECT 7").lastRowSet?.scalar == "7")
     }

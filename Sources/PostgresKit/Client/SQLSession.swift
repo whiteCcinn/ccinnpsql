@@ -52,22 +52,20 @@ public actor SQLSession {
                 result = try await connection.simpleQuery(sql, limits: limits)
             }
             if client.serverInfo.keepsSessionState {
-                if mode == .simple {
-                    // A script may hold several statements; record those that change settings.
-                    for statement in SimpleStatementSplitter.split(sql) {
-                        settings.record(statement, inTransaction: result.transactionStatus != .idle)
-                    }
-                } else {
-                    settings.record(sql, inTransaction: result.transactionStatus != .idle)
-                }
+                // Statement by statement: a script's settings stick only as far as its transactions committed.
+                let statements = mode == .simple ? SimpleStatementSplitter.split(sql) : [sql]
+                settings.recordBatch(statements, completed: mode == .simple ? result.completedStatements : statements.count,
+                                     failed: result.cancelledAtRowLimit, finalStatus: result.transactionStatus)
             }
             return try await client.resolvingTypeNames(result, database: database)
         } catch let error as PostgresError {
-            let status = await connection.transactionStatus
-            if status == .failedTransaction { settings.discardPending() }
             if await connection.isBroken {
                 if self.connection === connection { self.connection = nil }
                 settings.discardPending()
+            } else if client.serverInfo.keepsSessionState {
+                let statements = mode == .simple ? SimpleStatementSplitter.split(sql) : [sql]
+                settings.recordBatch(statements, completed: mode == .simple ? error.completedStatements : 0, failed: true,
+                                     finalStatus: await connection.transactionStatus)
             }
             throw error
         }
@@ -113,6 +111,31 @@ enum SimpleStatementSplitter {
         func peek(_ offset: Int) -> Unicode.Scalar? { index + offset < scalars.count ? scalars[index + offset] : nil }
         while index < scalars.count {
             let scalar = scalars[index]
+            if scalar == "'", index > 0, scalars[index - 1] == "E" || scalars[index - 1] == "e",
+               index < 2 || !(scalars[index - 2].properties.isAlphabetic || scalars[index - 2] == "_" || ("0"..."9").contains(scalars[index - 2])) {
+                // E'…' escape string: a backslash escapes the next character, including a quote.
+                current.unicodeScalars.append(scalar)
+                index += 1
+                while index < scalars.count {
+                    current.unicodeScalars.append(scalars[index])
+                    if scalars[index] == "\\", index + 1 < scalars.count {
+                        current.unicodeScalars.append(scalars[index + 1])
+                        index += 2
+                        continue
+                    }
+                    if scalars[index] == "'" {
+                        if peek(1) == "'" {
+                            current.unicodeScalars.append(scalars[index + 1])
+                            index += 2
+                            continue
+                        }
+                        index += 1
+                        break
+                    }
+                    index += 1
+                }
+                continue
+            }
             if scalar == "'" || scalar == "\"" {
                 let quote = scalar
                 current.unicodeScalars.append(scalar)

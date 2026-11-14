@@ -18,9 +18,20 @@ struct SessionSettingsTests {
         #expect(SessionSettingChange.parse("RESET work_mem") == .reset(name: "work_mem"))
         #expect(SessionSettingChange.parse("RESET ALL") == .resetAll)
         #expect(SessionSettingChange.parse("DISCARD ALL") == .resetAll)
-        #expect(SessionSettingChange.parse("COMMIT") == .commit)
-        #expect(SessionSettingChange.parse("ROLLBACK") == .rollback)
-        #expect(SessionSettingChange.parse("ROLLBACK TO SAVEPOINT a") == nil)
+        #expect(SessionSettingChange.parse("COMMIT") == .commit(chain: false))
+        #expect(SessionSettingChange.parse("COMMIT AND CHAIN") == .commit(chain: true))
+        #expect(SessionSettingChange.parse("COMMIT AND NO CHAIN") == .commit(chain: false))
+        #expect(SessionSettingChange.parse("ROLLBACK") == .rollback(chain: false))
+        #expect(SessionSettingChange.parse("ROLLBACK TO SAVEPOINT a") == .rollbackToSavepoint("a"))
+        #expect(SessionSettingChange.parse("rollback work to b;") == .rollbackToSavepoint("b"))
+        #expect(SessionSettingChange.parse("COMMIT PREPARED 'x'") == nil)
+        #expect(SessionSettingChange.parse("ROLLBACK PREPARED 'x'") == nil)
+        #expect(SessionSettingChange.parse("PREPARE TRANSACTION 'x'") == .commit(chain: false))
+        #expect(SessionSettingChange.parse("BEGIN ISOLATION LEVEL SERIALIZABLE") == .begin)
+        #expect(SessionSettingChange.parse("START TRANSACTION") == .begin)
+        #expect(SessionSettingChange.parse("SAVEPOINT s1") == .savepoint("s1"))
+        #expect(SessionSettingChange.parse("RELEASE SAVEPOINT s1") == .releaseSavepoint("s1"))
+        #expect(SessionSettingChange.parse("RELEASE s1") == .releaseSavepoint("s1"))
         #expect(SessionSettingChange.parse("SELECT set_config('app.user', 'x', false)") == .set(name: "app.user", statement: "SELECT set_config('app.user', 'x', false)"))
         #expect(SessionSettingChange.parse("SELECT set_config('app.user', 'x', true)") == nil)
         #expect(SessionSettingChange.parse("SELECT 1") == nil)
@@ -48,6 +59,39 @@ struct SessionSettingsTests {
         #expect(log.replayStatements == ["SET search_path TO b"])
         log.record("DISCARD ALL", inTransaction: false)
         #expect(log.replayStatements.isEmpty)
+    }
+
+    /// Review finding 9: scripts are tracked statement by statement, with savepoints and implicit blocks.
+    @Test func scriptsTrackTransactionsStatementByStatement() {
+        func replay(_ batches: [(String, completed: Int?, failed: Bool, status: TransactionStatus)]) -> [String] {
+            var log = SessionSettingsLog()
+            for (script, completed, failed, status) in batches {
+                let statements = SimpleStatementSplitter.split(script)
+                log.recordBatch(statements, completed: completed ?? statements.count, failed: failed, finalStatus: status)
+            }
+            return log.replayStatements
+        }
+        #expect(replay([("BEGIN; SET search_path = x; ROLLBACK", nil, false, .idle)]).isEmpty)
+        #expect(replay([("BEGIN; SET a.x = 1; SAVEPOINT s; SET a.y = 2; ROLLBACK TO SAVEPOINT s; COMMIT", nil, false, .idle)]) == ["SET a.x = 1"])
+        #expect(replay([("BEGIN; SAVEPOINT s; SET a.x = 1; RELEASE s; COMMIT", nil, false, .idle)]) == ["SET a.x = 1"])
+        // An error later in the batch rolls back its implicit block; explicit commits before it stay.
+        #expect(replay([("SET a.x = 1; SELECT 1/0", 1, true, .idle)]).isEmpty)
+        #expect(replay([("BEGIN; SET a.x = 1; COMMIT; SET a.y = 2; SELECT 1/0", 4, true, .idle)]) == ["SET a.x = 1"])
+        // BEGIN in the middle of a batch takes the implicit block's statements into the transaction.
+        #expect(replay([("SET a.x = 1; BEGIN; SET a.y = 2; ROLLBACK", nil, false, .idle)]).isEmpty)
+        // A row-limit cancel is a failure too.
+        #expect(replay([("SET a.x = 1; SELECT * FROM big", 1, true, .idle)]).isEmpty)
+        // Across runs: an aborted transaction commits nothing, unless ROLLBACK TO recovers it.
+        #expect(replay([("BEGIN", nil, false, .inTransaction), ("SET a.x = 1", nil, false, .inTransaction),
+                        ("SELECT 1/0", 0, true, .failedTransaction), ("COMMIT", nil, false, .idle)]).isEmpty)
+        #expect(replay([("BEGIN; SET a.x = 1; SAVEPOINT s; SET a.y = 2", nil, false, .inTransaction), ("SELECT 1/0", 0, true, .failedTransaction),
+                        ("ROLLBACK TO s", nil, false, .inTransaction), ("COMMIT", nil, false, .idle)]) == ["SET a.x = 1"])
+        // A transaction ended by something not parsed (a procedure's COMMIT) replays nothing from it.
+        #expect(replay([("BEGIN; SET a.x = 1", nil, false, .inTransaction), ("CALL p()", nil, false, .idle), ("COMMIT", nil, false, .idle)]).isEmpty)
+        #expect(replay([("BEGIN; SET a.x = 1; COMMIT AND CHAIN; SET a.y = 2; ROLLBACK", nil, false, .idle)]) == ["SET a.x = 1"])
+        #expect(replay([("SET a.x = 1; SET a.y = 2", nil, false, .idle)]) == ["SET a.x = 1", "SET a.y = 2"])
+        // Escape strings do not end statements early.
+        #expect(SimpleStatementSplitter.split("SELECT E'it\\'s; fine'; SET a.x = 1; -- done") == ["SELECT E'it\\'s; fine'", "SET a.x = 1"])
     }
 
     @Test func boundedLog() {

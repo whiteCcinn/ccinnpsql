@@ -96,3 +96,58 @@ struct ClientTests {
         #expect(TypeNameKey(oid: 16_384, database: "a") != TypeNameKey(oid: 16_384, database: "b"))
     }
 }
+
+/// Review finding 5: reaching the row limit must not cancel the statement (a cancel rolls back the batch's
+/// uncommitted work); only a drain over budget is cancelled, and then reported as a rollback.
+@Suite("Row limit draining")
+struct RowLimitDrainTests {
+    @Test func rowsPastTheLimitAreSkippedWithoutCancelling() async throws {
+        let network = FakeNetwork { index in
+            FakePostgresServer(pid: Int32(100 + index)) { _ in
+                .bytes(Wire.complete("INSERT 0 1") + Wire.rows(["g"], (1...50).map { [String($0)] }) + Wire.complete("INSERT 0 1"))
+            }
+        }
+        let connection = try await PostgresConnection.connect(fakeConfiguration(), transportFactory: network.factory)
+        defer { Task { await connection.close() } }
+        let result = try await connection.simpleQuery("INSERT …; SELECT g …; INSERT …", limits: RowLimits(maxRows: 10))
+        #expect(result.results.count == 3)
+        #expect(result.results[1].rows.count == 10)
+        #expect(result.results[1].isTruncated)
+        #expect(result.completedStatements == 3)
+        #expect(!result.cancelledAtRowLimit)
+        #expect(!result.notices.contains { $0.severity == "WARNING" })
+        let server = try #require(network.servers.withLock { $0.first })
+        #expect(server.cancelCount == 0, "the row limit sent a CancelRequest")
+    }
+
+    @Test func aDrainOverBudgetIsCancelledAndReportedAsRolledBack() async throws {
+        let network = FakeNetwork { index in
+            FakePostgresServer(pid: Int32(100 + index)) { _ in
+                .partialThenHang(Wire.complete("INSERT 0 1") + Wire.rowDescription(["g"]) + (1...20).flatMap { Wire.dataRow([String($0)]) })
+            }
+        }
+        let connection = try await PostgresConnection.connect(fakeConfiguration(), transportFactory: network.factory)
+        defer { Task { await connection.close() } }
+        let result = try await connection.simpleQuery("INSERT …; SELECT g …", limits: RowLimits(maxRows: 5, drainRows: 3))
+        #expect(result.cancelledAtRowLimit)
+        #expect(result.completedStatements == 1)
+        #expect(result.results.last?.rows.count == 5)
+        let warning = try #require(result.notices.last)
+        #expect(warning.severity == "WARNING")
+        #expect(warning.message.contains("rolled back"), "\(warning.message)")
+        #expect(await connection.isBroken == false)
+    }
+
+    @Test func drainTimeBudgetAlsoCancels() async throws {
+        let network = FakeNetwork { index in
+            FakePostgresServer(pid: Int32(100 + index)) { _ in
+                .partialThenHang(Wire.rowDescription(["g"]) + (1...20).flatMap { Wire.dataRow([String($0)]) })
+            }
+        }
+        let connection = try await PostgresConnection.connect(fakeConfiguration(), transportFactory: network.factory)
+        defer { Task { await connection.close() } }
+        let result = try await connection.simpleQuery("SELECT g …", limits: RowLimits(maxRows: 5, drainSeconds: 0))
+        #expect(result.cancelledAtRowLimit)
+        #expect(result.results.last?.rows.count == 5)
+    }
+}

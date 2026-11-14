@@ -199,14 +199,22 @@ public struct QueryResult: Sendable {
     public var transactionStatus: TransactionStatus
     /// ParameterStatus changes reported while the command ran (`TimeZone`, `search_path` on PostgreSQL 18, …).
     public var parameterChanges: [String: String]
+    /// Statements that completed (CommandComplete), in a simple-protocol batch.
+    public var completedStatements: Int
+    /// Skipping rows past the row limit took too long and the statement was cancelled: the server rolled back
+    /// what the batch had not committed (or aborted the open transaction), and later statements did not run.
+    public var cancelledAtRowLimit: Bool
 
     public init(results: [ResultSet] = [], notices: [ServerMessageFields] = [], notifications: [NotificationMessage] = [],
-                transactionStatus: TransactionStatus = .idle, parameterChanges: [String: String] = [:]) {
+                transactionStatus: TransactionStatus = .idle, parameterChanges: [String: String] = [:], completedStatements: Int = 0,
+                cancelledAtRowLimit: Bool = false) {
         self.results = results
         self.notices = notices
         self.notifications = notifications
         self.transactionStatus = transactionStatus
         self.parameterChanges = parameterChanges
+        self.completedStatements = completedStatements
+        self.cancelledAtRowLimit = cancelledAtRowLimit
     }
 
     /// The last result (scalar and metadata helpers use it).
@@ -222,14 +230,17 @@ public struct RowLimits: Sendable, Equatable {
     public var maxRows: Int
     /// Bytes of row payload kept per result set.
     public var maxBytes: Int
-    /// Rows still read and discarded after the limit (while the server reacts to the cancel) before the
-    /// connection is dropped instead. The cancel's grace period bounds the time spent draining as well.
+    /// Rows past the limit are read and discarded so the statement (and its batch or transaction) completes
+    /// normally; a cancel would roll back what the batch had not committed. Only after `drainRows` discarded rows
+    /// or `drainSeconds` of skipping is the statement cancelled (the cancel's grace period then bounds the rest).
     public var drainRows: Int
+    public var drainSeconds: Double
 
-    public init(maxRows: Int = 100_000, maxBytes: Int = 512 * 1024 * 1024, drainRows: Int = 10_000_000) {
+    public init(maxRows: Int = 100_000, maxBytes: Int = 512 * 1024 * 1024, drainRows: Int = 10_000_000, drainSeconds: Double = 15) {
         self.maxRows = max(0, maxRows)
         self.maxBytes = max(0, maxBytes)
         self.drainRows = max(0, drainRows)
+        self.drainSeconds = drainSeconds.isFinite ? max(0, drainSeconds) : 15
     }
 
     public static let metadata = RowLimits(maxRows: 200_000, maxBytes: 256 * 1024 * 1024)

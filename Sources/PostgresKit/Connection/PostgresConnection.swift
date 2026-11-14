@@ -260,10 +260,12 @@ public actor PostgresConnection {
             if failure.error.isQueryCanceled, canceller.cancellation(of: generation) == .task || Task.isCancelled {
                 var cancelled = PostgresError.cancelled()
                 cancelled.notices = failure.notices
+                cancelled.completedStatements = failure.completedStatements
                 throw cancelled
             }
             var error = failure.error
             error.notices = failure.notices
+            error.completedStatements = failure.completedStatements
             throw error
         } catch {
             canceller.end(generation)
@@ -315,4 +317,5 @@ struct QueryFailure: Error, Sendable {
     let transactionStatus: TransactionStatus
     let parameters: [String: String]
     let notices: [ServerMessageFields]
+    var completedStatements = 0
 }
