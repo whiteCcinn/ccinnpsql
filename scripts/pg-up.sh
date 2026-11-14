@@ -26,13 +26,17 @@ port_for() {
 }
 
 mkdir -p "$STATE_DIR/certs" "$STATE_DIR/init"
-if [ ! -f "$STATE_DIR/certs/server.crt" ]; then
+# A typical private-CA server certificate: valid for 10 years and without extendedKeyUsage, which libpq accepts
+# and Apple's TLS server policy would not (the client must verify like libpq). Older test certificates that
+# expire within five years are replaced.
+if [ ! -f "$STATE_DIR/certs/server.crt" ] || ! openssl x509 -in "$STATE_DIR/certs/server.crt" -noout -checkend $((5 * 365 * 86400)) >/dev/null 2>&1; then
   (
     cd "$STATE_DIR/certs"
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 3650 -subj "/CN=CcinnPsql Test CA" 2>/dev/null
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 3650 -subj "/CN=CcinnPsql Test CA" \
+      -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
     openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost" 2>/dev/null
-    printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n" > ext.cnf
-    openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 825 -extfile ext.cnf 2>/dev/null
+    printf "subjectAltName=DNS:localhost,IP:127.0.0.1\n" > ext.cnf
+    openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 3650 -extfile ext.cnf 2>/dev/null
     chmod 644 server.key
   )
 fi

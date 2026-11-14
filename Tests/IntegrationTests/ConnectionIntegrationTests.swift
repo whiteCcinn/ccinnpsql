@@ -85,12 +85,24 @@ struct ConnectionIntegrationTests {
         let full = try await PostgresConnection.connect(verified)
         await full.close()
 
+        // The test certificate is valid for 10 years and has no extendedKeyUsage (review finding 4): verify-full
+        // also matches the IP address SAN when the host is 127.0.0.1.
+        verified.tlsServerName = "127.0.0.1"
+        let byAddress = try await PostgresConnection.connect(verified)
+        await byAddress.close()
+        var caOnly = IT.configuration(version, sslMode: .verifyCA)
+        caOnly.rootCertificatePath = IT.caPath
+        let chainOnly = try await PostgresConnection.connect(caOnly)
+        await chainOnly.close()
+
         verified.tlsServerName = "wrong.example.com"
         do {
             _ = try await PostgresConnection.connect(verified)
             Issue.record("hostname mismatch accepted")
         } catch let error as PostgresError {
             #expect(error.kind == .tls)
+            #expect(error.message.contains("does not match “wrong.example.com”"), "\(error.message)")
+            #expect(error.message.contains("localhost"))
         }
 
         var untrusted = IT.configuration(version, sslMode: .verifyCA)

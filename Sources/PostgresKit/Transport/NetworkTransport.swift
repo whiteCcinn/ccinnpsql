@@ -11,11 +11,15 @@ final class NetworkTransport: ByteTransport, @unchecked Sendable {
     private let queue: DispatchQueue
     private let endpoint: Endpoint
     private let resolved = OSAllocatedUnfairLock<(remote: Endpoint?, tls: String?)>(initialState: (nil, nil))
+    /// Why certificate verification failed (set by the verify block), for a precise error message.
+    private let verificationFailure: OSAllocatedUnfairLock<PeerCertificateVerifier.Failure?>
 
-    private init(connection: NWConnection, queue: DispatchQueue, endpoint: Endpoint) {
+    private init(connection: NWConnection, queue: DispatchQueue, endpoint: Endpoint,
+                 verificationFailure: OSAllocatedUnfairLock<PeerCertificateVerifier.Failure?>) {
         self.connection = connection
         self.queue = queue
         self.endpoint = endpoint
+        self.verificationFailure = verificationFailure
     }
 
     var remoteEndpoint: Endpoint? { resolved.withLock { $0.remote } }
@@ -37,8 +41,9 @@ final class NetworkTransport: ByteTransport, @unchecked Sendable {
         let queue = DispatchQueue(label: "ccinnpsql.transport.\(endpoint)", qos: .userInitiated)
 
         let parameters: NWParameters
+        let verificationFailure = OSAllocatedUnfairLock<PeerCertificateVerifier.Failure?>(initialState: nil)
         if let tls = options.tls, tls.mode.usesTLS {
-            let tlsOptions = try TLSSetup.options(for: tls, queue: queue)
+            let tlsOptions = try TLSSetup.options(for: tls, queue: queue, failure: verificationFailure)
             parameters = NWParameters(tls: tlsOptions, tcp: tcp)
             if tls.negotiation == .postgres {
                 // Stack: TLS → SSLRequest framer → TCP. The framer negotiates in clear text, then steps aside.
@@ -49,7 +54,7 @@ final class NetworkTransport: ByteTransport, @unchecked Sendable {
         }
 
         let connection = NWConnection(to: .hostPort(host: NWEndpoint.Host(host), port: port), using: parameters)
-        let transport = NetworkTransport(connection: connection, queue: queue, endpoint: endpoint)
+        let transport = NetworkTransport(connection: connection, queue: queue, endpoint: endpoint, verificationFailure: verificationFailure)
         try await transport.start(timeout: options.connectTimeout, tls: options.tls)
         return transport
     }
@@ -63,6 +68,7 @@ final class NetworkTransport: ByteTransport, @unchecked Sendable {
         let connection = self.connection
         let queue = self.queue
         let resolved = self.resolved
+        let verificationFailure = self.verificationFailure
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -86,9 +92,11 @@ final class NetworkTransport: ByteTransport, @unchecked Sendable {
                 connection.stateUpdateHandler = { state in
                     switch state {
                     case .ready: finish(.success(()))
-                    case let .failed(error): finish(.failure(Self.describe(error, endpoint: endpoint, tls: tls)))
+                    case let .failed(error):
+                        finish(.failure(Self.describe(error, endpoint: endpoint, tls: tls, verification: verificationFailure.withLock { $0 })))
                     // Network.framework would keep retrying (e.g. connection refused); fail fast instead.
-                    case let .waiting(error): finish(.failure(Self.describe(error, endpoint: endpoint, tls: tls)))
+                    case let .waiting(error):
+                        finish(.failure(Self.describe(error, endpoint: endpoint, tls: tls, verification: verificationFailure.withLock { $0 })))
                     case .cancelled: finish(.failure(PostgresError(.cancelled, "Connection to \(endpoint) was cancelled")))
                     default: break
                     }
@@ -173,7 +181,11 @@ final class NetworkTransport: ByteTransport, @unchecked Sendable {
         }
     }
 
-    static func describe(_ error: NWError, endpoint: Endpoint, tls: TLSConfiguration?) -> PostgresError {
+    static func describe(_ error: NWError, endpoint: Endpoint, tls: TLSConfiguration?,
+                         verification: PeerCertificateVerifier.Failure? = nil) -> PostgresError {
+        if let verification {
+            return PostgresError(.tls, "TLS connection to \(endpoint) failed: \(verification.message)")
+        }
         switch error {
         case let .posix(code):
             switch code {
@@ -213,7 +225,8 @@ extension PostgresError {
 
 /// Builds TLS options: minimum TLS 1.2, SNI, ALPN for direct TLS and certificate verification per sslmode.
 enum TLSSetup {
-    static func options(for configuration: TLSConfiguration, queue: DispatchQueue) throws -> NWProtocolTLS.Options {
+    static func options(for configuration: TLSConfiguration, queue: DispatchQueue,
+                        failure: OSAllocatedUnfairLock<PeerCertificateVerifier.Failure?>) throws -> NWProtocolTLS.Options {
         let options = NWProtocolTLS.Options()
         let security = options.securityProtocolOptions
         sec_protocol_options_set_min_tls_protocol_version(security, .TLSv12)
@@ -226,6 +239,9 @@ enum TLSSetup {
         }
         let anchors = try configuration.rootCertificatePath.map(loadCertificates)
         let mode = configuration.mode
+        if mode == .verifyFull, serverName.isEmpty {
+            throw PostgresError(.tls, "SSL mode “verify-full” needs a host name to check the server certificate against")
+        }
         let verifyHost: String? = mode == .verifyFull ? serverName : nil
         sec_protocol_options_set_verify_block(security, { _, trust, complete in
             guard mode.verifiesChain else {
@@ -233,14 +249,13 @@ enum TLSSetup {
                 return
             }
             let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-            let policy = SecPolicyCreateSSL(true, verifyHost.map { $0 as CFString })
-            SecTrustSetPolicies(secTrust, policy)
-            if let anchors {
-                SecTrustSetAnchorCertificates(secTrust, anchors as CFArray)
-                SecTrustSetAnchorCertificatesOnly(secTrust, true)
+            switch PeerCertificateVerifier.evaluate(secTrust, anchors: anchors, hostName: verifyHost) {
+            case .success:
+                complete(true)
+            case let .failure(reason):
+                failure.withLock { $0 = reason }
+                complete(false)
             }
-            var error: CFError?
-            complete(SecTrustEvaluateWithError(secTrust, &error))
         }, queue)
         return options
     }
