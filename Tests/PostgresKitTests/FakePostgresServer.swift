@@ -76,6 +76,9 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
         case raw([UInt8])
         /// Never answers until cancelled (then 57014) or closed.
         case hang
+        /// Answers after a delay unless a cancel arrives first (then 57014). A cancel arriving while the server is
+        /// idle is ignored, as PostgreSQL does.
+        case delayed([UInt8], seconds: Double)
     }
 
     private struct State {
@@ -88,6 +91,10 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
         var hanging = false
         var cancels = 0
         var extendedPending = false
+        var cancelArrivals: [ContinuousClock.Instant] = []
+        var queryArrivals: [ContinuousClock.Instant] = []
+        var pendingGeneration = 0
+        var idleCancels = 0
     }
 
     private let state = OSAllocatedUnfairLock(uncheckedState: State())
@@ -109,6 +116,10 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
     var cancelCount: Int { state.withLockUnchecked { $0.cancels } }
     var isClosed: Bool { state.withLockUnchecked { $0.closed } }
     var isHanging: Bool { state.withLockUnchecked { $0.hanging } }
+    var cancelArrivals: [ContinuousClock.Instant] { state.withLockUnchecked { $0.cancelArrivals } }
+    var queryArrivals: [ContinuousClock.Instant] { state.withLockUnchecked { $0.queryArrivals } }
+    /// Cancels that arrived while nothing was running (ignored).
+    var idleCancels: Int { state.withLockUnchecked { $0.idleCancels } }
 
     var remoteEndpoint: Endpoint? { Endpoint(host: "10.0.0.7", port: 5432) }
 
@@ -170,8 +181,13 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
     func cancel() {
         let wasHanging = state.withLockUnchecked { state -> Bool in
             state.cancels += 1
+            state.cancelArrivals.append(ContinuousClock.now)
             guard !ignoresCancel else { return false }
-            defer { state.hanging = false }
+            if !state.hanging { state.idleCancels += 1 }
+            defer {
+                state.hanging = false
+                state.pendingGeneration += 1 // a delayed answer must not follow the cancel error
+            }
             return state.hanging
         }
         if wasHanging { enqueue(Wire.error("57014", "canceling statement due to user request") + Wire.ready()) }
@@ -223,6 +239,7 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
     }
 
     private func respond(to query: String, extended: Bool) {
+        state.withLockUnchecked { $0.queryArrivals.append(ContinuousClock.now) }
         switch handler(query) {
         case let .bytes(bytes):
             let prefix = extended ? Wire.message("1") + Wire.message("2") : []
@@ -233,6 +250,22 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
         case .hang:
             state.withLockUnchecked { $0.hanging = true }
             if extended { enqueue(Wire.message("1") + Wire.message("2")) }
+        case let .delayed(bytes, seconds):
+            let generation = state.withLockUnchecked { state -> Int in
+                state.hanging = true
+                state.pendingGeneration += 1
+                return state.pendingGeneration
+            }
+            if extended { enqueue(Wire.message("1") + Wire.message("2")) }
+            Task {
+                try? await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
+                let stillPending = self.state.withLockUnchecked { state -> Bool in
+                    guard state.pendingGeneration == generation, state.hanging else { return false }
+                    state.hanging = false
+                    return true
+                }
+                if stillPending { self.enqueue(bytes + Wire.ready()) }
+            }
         }
     }
 

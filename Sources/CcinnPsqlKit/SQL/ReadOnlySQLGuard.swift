@@ -33,6 +33,16 @@ public enum ReadOnlySQLGuard {
         "pg_log_backend_memory_contexts", "pg_sync_replication_slots",
     ]
 
+    /// Name prefixes of function families that write, signal, touch server files or execute SQL elsewhere.
+    static let forbiddenPrefixes = [
+        "pg_replication_origin_", "pg_stat_reset", "pg_create_", "pg_drop_", "pg_file_", "pg_ls_", "pg_read_", "lo_", "dblink",
+        "pg_logical_", "pg_wal_replay_", "pg_xlog_replay_", "pg_advisory_", "pg_try_advisory_", "pg_backup_", "pg_switch_",
+    ]
+
+    static func isForbiddenFunction(_ name: String) -> Bool {
+        forbiddenFunctions.contains(name) || forbiddenPrefixes.contains { name.hasPrefix($0) }
+    }
+
     /// `nil` when allowed; otherwise the reason it is rejected.
     public static func check(_ sql: String) -> String? {
         let statements = SQLStatementSplitter.split(sql)
@@ -68,6 +78,11 @@ public enum ReadOnlySQLGuard {
             if analysis.isPunctuation(index, "(") { depth += 1 }
             if analysis.isPunctuation(index, ")") { depth = max(0, depth - 1) }
             guard token.kind == .keyword || token.kind == .identifier || token.kind == .quotedIdentifier else { continue }
+            let raw = analysis.lexer.text(of: token)
+            if token.kind == .quotedIdentifier, raw.hasPrefix("U&") || raw.hasPrefix("u&") {
+                // Unicode escapes can spell any function name; not needed for read-only questions.
+                return "Unicode-escaped identifiers (U&\"…\") are not allowed in read-only mode."
+            }
             let word = analysis.words[index]
             if token.kind == .keyword, forbidden.contains(word) { return "`\(word)` is not allowed in a read-only query." }
             if token.kind == .keyword, word == "INTO" { return "SELECT … INTO creates a table; it is not allowed in read-only mode." }
@@ -79,7 +94,7 @@ public enum ReadOnlySQLGuard {
             // Function calls: name ( … ), also schema-qualified.
             if analysis.isPunctuation(index + 1, "(") {
                 let name = analysis.lexer.identifierValue(of: token)
-                if forbiddenFunctions.contains(name) {
+                if isForbiddenFunction(name) {
                     return "`\(name)()` has side effects outside the query and is not allowed in read-only mode."
                 }
             }

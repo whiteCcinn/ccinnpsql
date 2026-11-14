@@ -230,7 +230,8 @@ public struct PostgresMCPTools: MCPToolProvider {
         return [
             "product": .string(info.productSummary), "version": .string(info.version.description), "version_string": .string(info.versionString),
             "current_user": .string(info.currentUser), "current_database": .string(info.currentDatabase), "superuser": .bool(info.isSuperuser),
-            "in_recovery": .bool(info.isInRecovery), "tls": JSONValue(info.tlsDescription), "pooler": .string(info.pooler.displayName),
+            "in_recovery": .bool(info.isInRecovery), "tls": .bool(info.tlsDescription != nil), "tls_version": JSONValue(info.tlsDescription),
+            "pooler": .string(info.pooler.displayName),
             "pooling_mode": .string(info.poolingMode.rawValue), "pooling_detail": .string(info.poolingDetail),
             "max_connections": JSONValue(info.maxConnections),
             "extensions": .array(info.extensions.map { ["name": .string($0.name), "version": .string($0.version), "schema": .string($0.schema)] }),

@@ -1,1 +1,1 @@
-print("placeholder")
+print("CcinnPsql (app under construction)")

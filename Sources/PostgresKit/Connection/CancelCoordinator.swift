@@ -50,10 +50,22 @@ final class CancelCoordinator: Sendable {
         self.forceClose = forceClose
     }
 
-    /// Waits for a previous cancel to be delivered (bounded by the sender's own timeout).
+    /// Waits for a previous cancel to be delivered (bounded by the sender's own timeout). Returns early when the
+    /// waiting task is cancelled, so a caller is never stuck behind someone else's cancel.
     func waitForPendingDelivery() async {
-        let pending = state.withLock { $0.pendingDelivery }
-        await pending?.value
+        guard let pending = state.withLock({ $0.pendingDelivery }) else { return }
+        let gate = OneShotGate()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                gate.arm(continuation)
+                Task.detached {
+                    await pending.value
+                    gate.open()
+                }
+            }
+        } onCancel: {
+            gate.open()
+        }
     }
 
     func begin() -> UInt64 {
@@ -103,6 +115,29 @@ final class CancelCoordinator: Sendable {
             if stillRunning { forceClose() }
         }
         return true
+    }
+}
+
+/// A continuation that is resumed exactly once, by whichever of several events comes first.
+final class OneShotGate: Sendable {
+    private let state = OSAllocatedUnfairLock<(continuation: CheckedContinuation<Void, Never>?, opened: Bool)>(initialState: (nil, false))
+
+    func arm(_ continuation: CheckedContinuation<Void, Never>) {
+        let resumeNow = state.withLock { state -> Bool in
+            if state.opened { return true }
+            state.continuation = continuation
+            return false
+        }
+        if resumeNow { continuation.resume() }
+    }
+
+    func open() {
+        let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
+            state.opened = true
+            defer { state.continuation = nil }
+            return state.continuation
+        }
+        continuation?.resume()
     }
 }
 

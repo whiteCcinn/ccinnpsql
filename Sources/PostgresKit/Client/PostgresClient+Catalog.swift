@@ -111,6 +111,30 @@ extension PostgresClient {
         return SchemaContents(schema: schema, relations: CatalogParser.withPartitionTotals(relations), routines: routines, types: types)
     }
 
+    /// Column names and types of several `schema.table` pairs at once (completion). Missing tables yield no entry.
+    public func columnsByTable(_ tables: [(schema: String, table: String)], database: String? = nil) async throws -> [String: [(name: String, type: String)]] {
+        guard !tables.isEmpty else { return [:] }
+        let schemas = "{" + tables.map { Self.arrayElement($0.schema) }.joined(separator: ",") + "}"
+        let names = "{" + tables.map { Self.arrayElement($0.table) }.joined(separator: ",") + "}"
+        let rows = try await records("""
+            SELECT n.nspname AS schema, c.relname AS table_name, a.attname, format_type(a.atttypid, a.atttypmod) AS type
+            FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN unnest($1::text[], $2::text[]) AS wanted(s, t) ON lower(n.nspname) = lower(wanted.s) AND lower(c.relname) = lower(wanted.t)
+            WHERE a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum
+            """, [.text(schemas), .text(names)], database: database)
+        var result: [String: [(name: String, type: String)]] = [:]
+        for row in rows {
+            guard let schema = row.text("schema"), let table = row.raw("table_name"), let column = row.raw("attname") else { continue }
+            result["\(schema).\(table)".lowercased(), default: []].append((column, row.text("type") ?? ""))
+        }
+        return result
+    }
+
+    /// A quoted element of a PostgreSQL text-array literal.
+    static func arrayElement(_ text: String) -> String {
+        "\"" + text.replacingOccurrences(of: "\0", with: "").replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
     public func extensions(database: String? = nil) async throws -> [ExtensionSummary] {
         try await records(CatalogSQL.extensions, database: database).compactMap { row in
             row.text("name").map {
