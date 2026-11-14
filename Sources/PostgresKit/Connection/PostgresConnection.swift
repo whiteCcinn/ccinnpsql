@@ -69,7 +69,7 @@ public actor PostgresConnection {
         let key = startup.backendKey
         let cancelEndpoint = channel.transport.remoteEndpoint ?? configuration.endpoint
         let transport = channel.transport
-        canceller = CancelCoordinator(sender: {
+        canceller = CancelCoordinator(graceSeconds: configuration.cancelGraceSeconds, sender: {
             guard let key else { return }
             await CancelRequestSender.send(key: key, endpoint: cancelEndpoint, tls: tls, transportFactory: transportFactory)
         }, forceClose: { transport.close() })

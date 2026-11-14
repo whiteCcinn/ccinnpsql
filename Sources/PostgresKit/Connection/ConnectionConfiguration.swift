@@ -19,6 +19,8 @@ public struct ConnectionConfiguration: Sendable, Equatable {
     public var allowCleartextPassword: Bool
     /// Upper bound for one backend message (protects memory from hostile servers).
     public var maxMessageSize: Int
+    /// Seconds a statement may keep running after its CancelRequest was delivered before the socket is closed.
+    public var cancelGraceSeconds: Double = 5
 
     public init(endpoint: Endpoint, username: String, password: String = "", database: String? = nil,
                 applicationName: String = "CcinnPsql", connectTimeout: Double = 10, sslMode: SSLMode = .prefer,
