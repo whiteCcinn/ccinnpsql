@@ -104,6 +104,12 @@ public final class PostgresClient: Sendable {
         }
     }
 
+    /// Runs `body` with an exclusively checked-out pooled connection of `database`. A connection left inside a
+    /// transaction or broken is not reused.
+    public func withConnection<T: Sendable>(database: String? = nil, _ body: (PostgresConnection) async throws -> T) async throws -> T {
+        try await pool(for: database).withConnection(body)
+    }
+
     /// Records of the last row set of `sql` (metadata helper).
     public func records(_ sql: String, _ parameters: [BindValue] = [], database: String? = nil,
                         timeout: Double? = PostgresClient.metadataTimeout) async throws -> [Record] {
