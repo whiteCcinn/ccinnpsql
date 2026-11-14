@@ -95,3 +95,7 @@ UPDATE products SET title = title || ' ' WHERE id % 2 = 0;
 REFRESH MATERIALIZED VIEW daily_revenue;
 REFRESH MATERIALIZED VIEW top_products;
 ANALYZE;
+-- Read access for the low-privilege test users (trust_user drives the MCP subprocess test).
+GRANT USAGE ON SCHEMA shop TO PUBLIC;
+GRANT SELECT ON ALL TABLES IN SCHEMA shop TO PUBLIC;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA shop TO PUBLIC;

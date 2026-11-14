@@ -145,8 +145,9 @@ private struct ActivityPane: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
                 if !tree.isEmpty {
+                    let lines = tree.reduce(0) { $0 + 1 + $1.blockedCount }
                     BlockingTreeView(tree: tree, model: model)
-                        .frame(maxHeight: 220)
+                        .frame(height: min(CGFloat(lines) * 22 + 44, 240))
                     Divider()
                 }
                 Table(sessions, selection: $selection) {
