@@ -146,6 +146,7 @@ private struct ProfileRow: View {
                 Text(profile.hostSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 0)
+            TLSIndicator(mode: profile.sslMode)
             if profile.ssh != nil { Image(systemName: "lock.shield").foregroundStyle(.secondary).help("SSH tunnel") }
             if profile.confirmMutations { Image(systemName: "exclamationmark.shield").foregroundStyle(.orange).help("Confirms data changes") }
             if profile.mcpAccess != .disabled {
@@ -468,5 +469,23 @@ enum PsqlCommand {
         if let ca = profile.rootCertificatePath, !ca.isEmpty { parts[1] += " sslrootcert=\(ca)" }
         parts[1] += "\""
         return parts.joined(separator: " ")
+    }
+}
+
+/// Configured TLS strength of a profile (the workspace header shows what was actually negotiated).
+struct TLSIndicator: View {
+    let mode: SSLMode
+
+    var body: some View {
+        switch mode {
+        case .verifyFull, .verifyCA:
+            Image(systemName: "lock.fill").foregroundStyle(.green).help("TLS with certificate verification (\(mode.displayName))")
+        case .require:
+            Image(systemName: "lock.fill").foregroundStyle(.secondary).help("TLS without certificate verification (Require)")
+        case .prefer:
+            Image(systemName: "lock.open").foregroundStyle(.secondary).help("TLS when the server offers it; may connect unencrypted (Prefer)")
+        case .disable:
+            Image(systemName: "lock.slash").foregroundStyle(.orange).help("Unencrypted (TLS disabled)")
+        }
     }
 }
