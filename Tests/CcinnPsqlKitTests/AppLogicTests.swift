@@ -116,7 +116,10 @@ struct ExportTests {
         #expect(markdown.contains("| id | name | ok | doc |\n| ---: | --- | --- | --- |\n| 1 | a\\|b | f | NULL |"))
         let insert = ResultExport.insertStatements(table: "shop.t", columns: columns, rows: [["1", "it's", "f", nil]])
         #expect(insert == "INSERT INTO shop.t (id, name, ok, doc) VALUES (1, 'it''s', false, NULL);\n")
-        #expect(ResultExport.copyStatement(for: "SELECT * FROM t;") == "COPY (SELECT * FROM t) TO STDOUT WITH (FORMAT csv, HEADER)")
+        #expect(ResultExport.copyStatement(for: "SELECT * FROM t;") == "COPY (SELECT * FROM t\n) TO STDOUT WITH (FORMAT csv, HEADER)")
+        // Review finding 7: a trailing line comment must not comment out the closing parenthesis.
+        let commented = ResultExport.copyStatement(for: "SELECT * FROM t -- newest first ;")
+        #expect(commented == "COPY (SELECT * FROM t -- newest first\n) TO STDOUT WITH (FORMAT csv, HEADER)")
         #expect(ResultExport.tsv(columns: columns, rows: [["1", "a\tb", nil, nil]]) == "id\tname\tok\tdoc\n1\ta b\t\t")
     }
 }

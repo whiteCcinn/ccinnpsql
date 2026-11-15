@@ -230,6 +230,14 @@ struct MetadataIntegrationTests {
         #expect(try await session.run("SHOW statement_timeout").lastRowSet?.scalar == "0")
         #expect(try await session.run("SHOW lock_timeout").lastRowSet?.scalar == "3s")
         #expect(try await session.run("SHOW work_mem").lastRowSet?.scalar == "4MB")
+        // Review finding 7: COPY exports run on the session (search_path, temporary tables).
+        _ = try await session.run("CREATE TEMP TABLE export_me AS SELECT 41 + 1 AS answer")
+        let exported = CopyCollector()
+        let tag = try await session.copyOut("COPY (SELECT (SELECT count(*) FROM customers) AS customers, answer FROM export_me -- note\n) TO STDOUT WITH (FORMAT csv, HEADER)") { chunk in
+            await exported.append(chunk)
+        }
+        #expect(tag?.rowCount == 1)
+        #expect(await exported.text == "customers,answer\n200,42\n")
         await session.close()
 
         let listener = try await PostgresListener.open(client: client)

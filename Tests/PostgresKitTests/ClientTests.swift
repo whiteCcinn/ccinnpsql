@@ -151,3 +151,69 @@ struct RowLimitDrainTests {
         #expect(result.results.last?.rows.count == 5)
     }
 }
+
+/// Review finding 8: NOTIFY payloads are bind parameters (never SQL text), and concurrent commands complete in
+/// the order they were written, each with its own outcome.
+@Suite("Listener")
+struct ListenerTests {
+    private func makeListener() async throws -> (PostgresClient, PostgresListener, FakeNetwork) {
+        let network = FakeNetwork { index in
+            let pid = Int32(100 + index)
+            return FakePostgresServer(pid: pid) { query in
+                if let reply = FakeFacts.reply(query, pid: pid) { return reply }
+                if query.contains("bad") { return .bytes(Wire.error("42601", "rejected: \(query)")) }
+                return .bytes(Wire.complete(query.hasPrefix("LISTEN") ? "LISTEN" : "SELECT 1"))
+            }
+        }
+        let client = try await PostgresClient.connect(fakeConfiguration(), transportFactory: network.factory)
+        return (client, try await PostgresListener.open(client: client), network)
+    }
+
+    @Test func notifyPayloadTravelsAsParameters() async throws {
+        let (client, listener, network) = try await makeListener()
+        defer {
+            listener.close()
+            Task { await client.close() }
+        }
+        let payload = "it\\'s'); DROP TABLE x; --"
+        try await listener.notify("jobs", payload: payload)
+        let server = try #require(network.servers.withLock { $0.last })
+        #expect(server.queries.contains("SELECT pg_notify($1, $2)"))
+        #expect(!server.queries.contains { $0.contains("DROP TABLE") }, "the payload reached SQL text")
+        let bind = try #require(server.packets.first { $0.type == UInt8(ascii: "B") })
+        #expect(String(decoding: bind.body, as: UTF8.self).contains(payload))
+    }
+
+    @Test func concurrentCommandsGetTheirOwnOutcome() async throws {
+        let (client, listener, _) = try await makeListener()
+        defer {
+            listener.close()
+            Task { await client.close() }
+        }
+        let outcomes = await withTaskGroup(of: (Int, Bool).self) { group in
+            for index in 0..<40 {
+                group.addTask {
+                    do {
+                        if index % 2 == 0 {
+                            try await listener.listen("ok\(index)")
+                        } else if index % 3 == 0 {
+                            try await listener.notify("jobs", payload: "\(index)") // parameters: the fake accepts it
+                        } else {
+                            try await listener.listen("bad\(index)")
+                        }
+                        return (index, true)
+                    } catch {
+                        return (index, false)
+                    }
+                }
+            }
+            var collected: [Int: Bool] = [:]
+            for await (index, succeeded) in group { collected[index] = succeeded }
+            return collected
+        }
+        #expect(outcomes.count == 40)
+        for (index, succeeded) in outcomes {
+            #expect(succeeded == (index % 2 == 0 || index % 3 == 0), "command \(index) got another command's outcome")
+        }
+    }
+}

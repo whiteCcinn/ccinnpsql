@@ -260,6 +260,11 @@ final class SQLTabModel {
     private func run(_ statements: [Step], mode: ExecutionMode = .extended,
                      confirmation: (title: String, statements: [String])? = nil, wrapped: Bool = false) {
         guard !isRunning, !statements.isEmpty else { return }
+        guard exportProgress == nil else {
+            // The export streams on this tab's session.
+            workspace.showToast("A COPY export is running in this tab; wait for it or cancel it.", isError: true)
+            return
+        }
         errorRange = nil
         isRunning = true
         runStartedAt = Date()
@@ -466,6 +471,7 @@ final class SQLTabModel {
 
     /// Streams the full result of `sql` with COPY … TO STDOUT (CSV) into a file, without the row limit.
     func exportWithCopy(_ sql: String) {
+        guard !isRunning, exportProgress == nil else { return }
         guard SQLStatementKind.of(sql) == .query, !isConsole else {
             workspace.showToast("COPY export works for SELECT / WITH / VALUES / TABLE queries.", isError: true)
             return
@@ -479,8 +485,8 @@ final class SQLTabModel {
             return
         }
         let copySQL = ResultExport.copyStatement(for: sql)
-        let client = workspace.client
-        let database = database
+        // The tab's own session: the query must see the same search_path, role and temporary tables.
+        let session = session
         let counter = ByteCounter()
         exportProgress = "Starting COPY…"
         exportTask = Task { [weak self] in
@@ -492,7 +498,7 @@ final class SQLTabModel {
                 }
             }
             do {
-                let tag = try await client.copyOut(copySQL, database: database) { chunk in
+                let tag = try await session.copyOut(copySQL) { chunk in
                     try handle.write(contentsOf: Data(chunk))
                     counter.add(chunk.count)
                 }

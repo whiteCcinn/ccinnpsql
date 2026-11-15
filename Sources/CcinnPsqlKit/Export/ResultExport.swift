@@ -184,10 +184,14 @@ public enum ResultExport {
         }.joined(separator: "\n") + (rows.isEmpty ? "" : "\n")
     }
 
-    /// `COPY (query) TO STDOUT WITH (FORMAT csv, HEADER)` for full exports streamed from the server.
+    /// `COPY (query) TO STDOUT WITH (FORMAT csv, HEADER)` for full exports streamed from the server. The query
+    /// ends on its own line so a trailing `-- comment` cannot swallow the closing parenthesis.
     public static func copyStatement(for query: String) -> String {
         var body = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        while body.hasSuffix(";") { body.removeLast() }
-        return "COPY (\(body)) TO STDOUT WITH (FORMAT csv, HEADER)"
+        while body.hasSuffix(";") {
+            body.removeLast()
+            body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "COPY (\(body)\n) TO STDOUT WITH (FORMAT csv, HEADER)"
     }
 }

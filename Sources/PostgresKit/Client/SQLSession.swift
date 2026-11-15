@@ -71,6 +71,27 @@ public actor SQLSession {
         }
     }
 
+    /// Streams `COPY … TO STDOUT` on this session's connection, so the export sees the session's search_path,
+    /// role, temporary tables and open transaction exactly like the query it exports.
+    public func copyOut(_ sql: String, sink: @escaping @Sendable ([UInt8]) async throws -> Void) async throws -> CommandTag? {
+        guard !isBusy else { throw PostgresError(.busy, "This editor is already running a statement") }
+        isBusy = true
+        defer { isBusy = false }
+        let connection = try await ensureConnection()
+        runGeneration &+= 1
+        do {
+            return try await connection.copyOut(sql, sink: sink)
+        } catch {
+            if await connection.isBroken {
+                if self.connection === connection { self.connection = nil }
+                settings.discardPending()
+            } else if await connection.transactionStatus == .failedTransaction {
+                settings.recordBatch([sql], completed: 0, failed: true, finalStatus: .failedTransaction)
+            }
+            throw error
+        }
+    }
+
     /// Asks the server to stop the running statement (generation-checked: never touches a later statement).
     public func cancel() {
         connection?.cancelRunningStatement()

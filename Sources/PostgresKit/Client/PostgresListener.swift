@@ -4,14 +4,18 @@ import PostgresWire
 
 /// A dedicated connection that receives NOTIFY messages as they arrive (LISTEN/NOTIFY panel).
 ///
-/// A background loop owns the read side of the socket; LISTEN/UNLISTEN/NOTIFY commands are written by
-/// callers and completed in order by the loop when their ReadyForQuery arrives.
+/// A background loop owns the read side of the socket; LISTEN/UNLISTEN/NOTIFY commands are queued by callers,
+/// written by one sender task in queue order, and completed in that same order when their ReadyForQuery arrives.
 public final class PostgresListener: Sendable {
     public let notifications: AsyncStream<NotificationMessage>
     private let continuation: AsyncStream<NotificationMessage>.Continuation
     private let transport: any ByteTransport
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let loop = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+    /// Outgoing messages; enqueued under `state`'s lock together with their waiter, so the write order is the
+    /// completion order.
+    private let outbox: AsyncStream<[UInt8]>.Continuation
+    private let sender: Task<Void, Never>
 
     private struct State {
         var pending: [CheckedContinuation<Void, any Error>] = []
@@ -51,23 +55,42 @@ public final class PostgresListener: Sendable {
     private init(transport: any ByteTransport) {
         self.transport = transport
         (notifications, continuation) = AsyncStream.makeStream(of: NotificationMessage.self, bufferingPolicy: .bufferingNewest(10_000))
+        let (messages, outbox) = AsyncStream.makeStream(of: [UInt8].self)
+        self.outbox = outbox
+        sender = Task.detached {
+            for await bytes in messages {
+                do {
+                    try await transport.send(bytes)
+                } catch {
+                    transport.close() // the read loop then fails every pending command
+                    return
+                }
+            }
+        }
     }
 
     public var channels: [String] { state.withLock { $0.channels.sorted() } }
 
     public func listen(_ channelName: String) async throws {
-        try await command("LISTEN " + SQLText.quoteIdentifier(channelName))
+        try await command(FrontendMessage.query("LISTEN " + SQLText.quoteIdentifier(channelName)))
         _ = state.withLock { $0.channels.insert(channelName) }
     }
 
     public func unlisten(_ channelName: String) async throws {
-        try await command("UNLISTEN " + SQLText.quoteIdentifier(channelName))
+        try await command(FrontendMessage.query("UNLISTEN " + SQLText.quoteIdentifier(channelName)))
         _ = state.withLock { $0.channels.remove(channelName) }
     }
 
-    /// Sends a notification with `pg_notify` (channel and payload as literals).
+    /// Sends a notification with `pg_notify`; channel and payload travel as bind parameters, never as SQL text.
     public func notify(_ channelName: String, payload: String) async throws {
-        try await command("SELECT pg_notify(\(SQLText.literal(channelName)), \(SQLText.literal(payload)))")
+        try await command(Self.notifyMessage(channel: channelName, payload: payload))
+    }
+
+    static func notifyMessage(channel: String, payload: String) -> [UInt8] {
+        FrontendMessage.parse(statement: "", query: "SELECT pg_notify($1, $2)")
+            + FrontendMessage.bind(portal: "", statement: "", parameters: [.text(channel), .text(payload)], resultFormats: [])
+            + FrontendMessage.execute(portal: "", maxRows: 0)
+            + FrontendMessage.sync
     }
 
     public func close() {
@@ -83,35 +106,30 @@ public final class PostgresListener: Sendable {
             transport.close()
         }
         continuation.finish()
+        outbox.finish()
         loop.withLock { $0?.cancel() }
     }
 
     deinit {
         transport.close()
         continuation.finish()
+        outbox.finish()
+        sender.cancel()
     }
 
     // MARK: Plumbing
 
-    private func command(_ sql: String) async throws {
+    /// Queues `message` (one command ending in ReadyForQuery) and waits for its outcome.
+    private func command(_ message: [UInt8]) async throws {
         try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, any Error>) in
+            let outbox = outbox
             let rejection = state.withLock { state -> PostgresError? in
                 if state.closed { return state.failure ?? PostgresError(.connectionClosed, "The listener is closed") }
                 state.pending.append(waiter)
+                outbox.yield(message)
                 return nil
             }
-            if let rejection {
-                waiter.resume(throwing: rejection)
-                return
-            }
-            let transport = transport
-            Task {
-                do {
-                    try await transport.send(FrontendMessage.query(sql))
-                } catch {
-                    transport.close() // the read loop then fails every pending command
-                }
-            }
+            if let rejection { waiter.resume(throwing: rejection) }
         }
     }
 
@@ -160,5 +178,6 @@ public final class PostgresListener: Sendable {
         }
         for waiter in pending { waiter.resume(throwing: error) }
         continuation.finish()
+        outbox.finish()
     }
 }
