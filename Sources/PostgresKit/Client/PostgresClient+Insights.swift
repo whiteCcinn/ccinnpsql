@@ -258,7 +258,7 @@ extension PostgresClient {
 
     public func grants(of relation: RelationSummary, database: String? = nil) async throws -> [GrantInfo] {
         try await records(InsightSQL.grants, [.text(String(relation.oid))], database: database).compactMap { row in
-            guard let grantee = row.text("grantee"), let privilege = row.text("privilege_type") else { return nil }
+            guard let grantee = row.raw("grantee"), let privilege = row.text("privilege_type") else { return nil }
             return GrantInfo(grantee: grantee, privilege: privilege, isGrantable: row.bool("is_grantable") ?? false, grantor: row.text("grantor"))
         }
     }
@@ -376,7 +376,7 @@ public enum InsightParser {
     }
 
     public static func partition(_ row: Record) -> PartitionInfo? {
-        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.text("schema"), let name = row.raw("name") else { return nil }
+        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.raw("schema"), let name = row.raw("name") else { return nil }
         let tuples = row.double("reltuples")
         return PartitionInfo(oid: oid, schema: schema, name: name, bound: row.text("bound"),
                              kind: row.text("relkind").flatMap(RelationKind.init(rawValue:)), totalBytes: row.int("total_bytes"),

@@ -235,7 +235,7 @@ public struct ServerInfo: Sendable {
             detail = "Set in the connection settings (\(override.displayName)); detected: \(detail.prefix(1).lowercased() + detail.dropFirst())"
         }
         return ServerInfo(versionString: facts.text("version") ?? reported, version: versionNumber,
-                          currentUser: facts.text("usr") ?? connection.username, currentDatabase: facts.text("db") ?? connection.database,
+                          currentUser: facts.raw("usr") ?? connection.username, currentDatabase: facts.raw("db") ?? connection.database,
                           isSuperuser: facts.bool("superuser") ?? false, isInRecovery: facts.bool("in_recovery") ?? false, node: node,
                           extensions: extensions, pooler: pooler, poolingMode: mode, poolingDetail: detail,
                           maxConnections: facts.int("max_connections").map { Int(clamping: $0) }, tlsDescription: connection.tlsDescription)
@@ -255,8 +255,8 @@ public struct ServerInfo: Sendable {
         try await connection.extendedQuery("""
             SELECT e.extname, e.extversion, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace ORDER BY 1
             """, limits: .metadata).records.compactMap { row in
-            guard let name = row.text("extname") else { return nil }
-            return InstalledExtension(name: name, version: row.text("extversion") ?? "", schema: row.text("nspname") ?? "public")
+            guard let name = row.raw("extname") else { return nil }
+            return InstalledExtension(name: name, version: row.text("extversion") ?? "", schema: row.raw("nspname") ?? "public")
         }
     }
 }

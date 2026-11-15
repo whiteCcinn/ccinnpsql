@@ -197,6 +197,10 @@ struct CatalogModelTests {
         #expect(parsed?.kind == .partitionedTable)
         #expect(parsed?.isUnlogged == true)
         #expect(parsed?.estimatedRows == nil) // never analyzed
+        // Review finding 12: identifiers are never trimmed (a schema named " spaced " is a different schema).
+        let spaced = CatalogParser.relation(Record(["oid": "1", "schema": " spaced ", "name": " t ", "relkind": "r"]))
+        #expect(spaced?.schema == " spaced ")
+        #expect(spaced?.qualifiedName == "\" spaced \".\" t \"")
         #expect(CatalogParser.relation(Record(["oid": "x", "schema": "s", "name": "n", "relkind": "r"])) == nil)
         #expect(CatalogParser.relation(Record(["oid": "1", "schema": "s", "name": "n", "relkind": "?"])) == nil)
         let routine = CatalogParser.routine(Record(["oid": "1", "schema": "s", "name": "f", "kind": "p", "arguments": "a integer",

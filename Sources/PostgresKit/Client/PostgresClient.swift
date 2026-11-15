@@ -210,7 +210,7 @@ public final class PostgresClient: Sendable {
             }
             var found: [TypeNameKey: String] = [:]
             for row in rows ?? [] {
-                if let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let name = row.text("typname") {
+                if let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let name = row.raw("typname") {
                     known[oid] = name
                     found[TypeNameKey(oid: oid, database: databaseName)] = name
                 }

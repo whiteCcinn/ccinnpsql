@@ -266,7 +266,7 @@ extension PostgresClient {
             entries += rows.compactMap { row in
                 guard let pid = row.int("pid").flatMap({ Int32(exactly: $0) }) else { return nil }
                 let details = view.columns.compactMap { column in row.text(column).map { ProgressDetail(name: column, value: $0) } }
-                return ProgressEntry(command: view.command, pid: pid, database: row.text("datname"), relation: row.text("relation"),
+                return ProgressEntry(command: view.command, pid: pid, database: row.raw("datname"), relation: row.text("relation"),
                                      phase: row.text("phase"), fraction: row.double("fraction").map { min(1, max(0, $0)) }, details: details,
                                      query: row.string("query"))
             }
@@ -285,7 +285,7 @@ extension PostgresClient {
         let view = SQLText.qualified(schema, "pg_stat_statements")
         let columns = try await records("""
             SELECT a.attname FROM pg_attribute a WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
-            """, [.text(view)], database: database).compactMap { $0.text("attname") }
+            """, [.text(view)], database: database).compactMap { $0.raw("attname") }
         let names = Set(columns)
         let total = names.contains("total_exec_time") ? "total_exec_time" : "total_time"
         let mean = names.contains("mean_exec_time") ? "mean_exec_time" : (names.contains("mean_time") ? "mean_time" : "NULL::float8")
@@ -308,7 +308,7 @@ extension PostgresClient {
 
     public func settings() async throws -> [ServerSetting] {
         try await records(OperationsSQL.settings).compactMap { row in
-            guard let name = row.text("name") else { return nil }
+            guard let name = row.raw("name") else { return nil }
             return ServerSetting(name: name, setting: row.string("setting"), unit: row.text("unit"), category: row.text("category"),
                                  description: row.text("short_desc"), source: row.text("source"), bootValue: row.string("boot_val"),
                                  resetValue: row.string("reset_val"), context: row.text("context"), pendingRestart: row.bool("pending_restart") ?? false)
@@ -337,7 +337,7 @@ extension PostgresClient {
             if let state = row.text("state") { states[state] = Int(clamping: row.int("n") ?? 0) }
         }
         let databases: [DatabaseStatistics] = try await databaseRows.compactMap { row in
-            guard let name = row.text("datname") else { return nil }
+            guard let name = row.raw("datname") else { return nil }
             return DatabaseStatistics(name: name, backends: Int(clamping: row.int("numbackends") ?? 0), commits: row.int("xact_commit"),
                                       rollbacks: row.int("xact_rollback"), blocksRead: row.int("blks_read"), blocksHit: row.int("blks_hit"),
                                       deadlocks: row.int("deadlocks"), tempBytes: row.int("temp_bytes"), conflicts: row.int("conflicts"),
@@ -351,7 +351,7 @@ extension PostgresClient {
 
     public func maintenanceCandidates(limit: Int = 50, database: String? = nil) async throws -> [MaintenanceCandidate] {
         try await records(OperationsSQL.maintenance, [.text(String(min(max(1, limit), 1_000)))], database: database).compactMap { row in
-            guard let schema = row.text("schemaname"), let name = row.raw("relname") else { return nil }
+            guard let schema = row.raw("schemaname"), let name = row.raw("relname") else { return nil }
             return MaintenanceCandidate(schema: schema, name: name, liveTuples: row.int("n_live_tup"), deadTuples: row.int("n_dead_tup"),
                                         lastVacuum: row.date("last_vacuum"), lastAnalyze: row.date("last_analyze"),
                                         transactionIDAge: row.int("xid_age"), totalBytes: row.int("total_bytes"))
@@ -360,7 +360,7 @@ extension PostgresClient {
 
     public func unusedIndexes(limit: Int = 100, database: String? = nil) async throws -> [IndexUsage] {
         try await records(OperationsSQL.unusedIndexes, [.text(String(min(max(1, limit), 1_000)))], database: database).compactMap { row in
-            guard let schema = row.text("schemaname"), let table = row.raw("relname"), let index = row.raw("indexrelname") else { return nil }
+            guard let schema = row.raw("schemaname"), let table = row.raw("relname"), let index = row.raw("indexrelname") else { return nil }
             return IndexUsage(schema: schema, table: table, index: index, scans: row.int("idx_scan") ?? 0, sizeBytes: row.int("size_bytes"),
                               isUnique: row.bool("indisunique") ?? false)
         }
@@ -384,7 +384,7 @@ public enum OperationsParser {
 
     public static func session(_ row: Record) -> ActivitySession? {
         guard let pid = row.int("pid").flatMap({ Int32(exactly: $0) }) else { return nil }
-        return ActivitySession(pid: pid, user: row.text("usename"), database: row.text("datname"), applicationName: row.text("application_name"),
+        return ActivitySession(pid: pid, user: row.raw("usename"), database: row.raw("datname"), applicationName: row.text("application_name"),
                                clientAddress: row.text("client_addr"), backendType: row.text("backend_type"), state: row.text("state"),
                                waitEventType: row.text("wait_event_type"), waitEvent: row.text("wait_event"), query: row.string("query"),
                                queryID: row.text("query_id"), querySeconds: row.double("query_seconds"), transactionSeconds: row.double("xact_seconds"),
@@ -396,13 +396,13 @@ public enum OperationsParser {
     public static func lock(_ row: Record) -> LockInfo? {
         guard let type = row.text("locktype"), let mode = row.text("mode") else { return nil }
         return LockInfo(pid: row.int("pid").flatMap { Int32(exactly: $0) }, lockType: type, relation: row.text("relation"), mode: mode,
-                        granted: row.bool("granted") ?? false, objectDetail: row.text("detail"), user: row.text("usename"),
+                        granted: row.bool("granted") ?? false, objectDetail: row.text("detail"), user: row.raw("usename"),
                         query: row.string("query"), state: row.text("state"), waitSeconds: row.double("wait_seconds"))
     }
 
     public static func replicationConnection(_ row: Record) -> ReplicationConnection? {
         guard let pid = row.int("pid").flatMap({ Int32(exactly: $0) }) else { return nil }
-        return ReplicationConnection(pid: pid, user: row.text("usename"), applicationName: row.text("application_name"),
+        return ReplicationConnection(pid: pid, user: row.raw("usename"), applicationName: row.text("application_name"),
                                      clientAddress: row.text("client_addr"), state: row.text("state"), syncState: row.text("sync_state"),
                                      sentLSN: row.text("sent_lsn"), writeLSN: row.text("write_lsn"), flushLSN: row.text("flush_lsn"),
                                      replayLSN: row.text("replay_lsn"), replayLagBytes: row.int("replay_lag_bytes"),
@@ -411,7 +411,7 @@ public enum OperationsParser {
     }
 
     public static func slot(_ row: Record) -> ReplicationSlot? {
-        guard let name = row.text("slot_name") else { return nil }
+        guard let name = row.raw("slot_name") else { return nil }
         return ReplicationSlot(name: name, plugin: row.text("plugin"), slotType: row.text("slot_type") ?? "", database: row.text("database"),
                                isActive: row.bool("active") ?? false, activePID: row.int("active_pid").flatMap { Int32(exactly: $0) },
                                isTemporary: row.bool("temporary") ?? false, restartLSN: row.text("restart_lsn"),
@@ -421,7 +421,7 @@ public enum OperationsParser {
 
     public static func statement(_ row: Record) -> StatementStatistics? {
         guard let query = row.string("query") else { return nil }
-        return StatementStatistics(queryID: row.text("queryid"), query: query, user: row.text("rolname"), database: row.text("datname"),
+        return StatementStatistics(queryID: row.text("queryid"), query: query, user: row.raw("rolname"), database: row.raw("datname"),
                                    calls: row.int("calls") ?? 0, totalMilliseconds: row.double("total_ms") ?? 0, meanMilliseconds: row.double("mean_ms"),
                                    maxMilliseconds: row.double("max_ms"), rows: row.int("rows"), sharedBlocksHit: row.int("shared_blks_hit"),
                                    sharedBlocksRead: row.int("shared_blks_read"), tempBlocksWritten: row.int("temp_blks_written"))

@@ -67,6 +67,22 @@ struct ConnectionIntegrationTests {
             #expect(error.kind == .authentication)
             #expect(error.sqlState == "28P01")
         }
+
+        // Review finding 12: SCRAM with passwords SASLprep leaves unchanged on the server (an unassigned code
+        // point, a bidi violation) and with one it normalizes.
+        let admin = try await IT.connect(version)
+        if version != "9.6" {
+            for (index, password) in ["\u{2168}\u{1F600}", "\u{05D0}a\u{FB20}", "\u{2168}\u{00A0}x"].enumerated() {
+                let role = "ccinnpsql_saslprep_\(index)"
+                _ = try await admin.simpleQuery("""
+                    DROP ROLE IF EXISTS \(role); SET password_encryption = 'scram-sha-256'; CREATE ROLE \(role) LOGIN PASSWORD '\(password)'
+                    """)
+                let connection = try await IT.connect(version, user: role, password: password, sslMode: .disable)
+                await connection.close()
+                _ = try await admin.simpleQuery("DROP ROLE \(role)")
+            }
+        }
+        await admin.close()
     }
 
     @Test(arguments: IT.versions)

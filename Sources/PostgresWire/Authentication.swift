@@ -175,7 +175,51 @@ public enum SASLprep {
         }
         let normalized = String(mapped).precomposedStringWithCompatibilityMapping
         if normalized.unicodeScalars.contains(where: isProhibited) { return password }
+        // Unassigned code points (RFC 3454 table A.1, Unicode 3.2) and bidi violations make PostgreSQL fall back
+        // to the raw password too; normalizing such a password here would make SCRAM fail.
+        if password.unicodeScalars.contains(where: isUnassigned) || normalized.unicodeScalars.contains(where: isUnassigned) {
+            return password
+        }
+        if !satisfiesBidiRule(Array(normalized.unicodeScalars)) { return password }
         return normalized
+    }
+
+    /// Not assigned in Unicode 3.2, the version SASLprep is defined against.
+    static func isUnassigned(_ scalar: Unicode.Scalar) -> Bool {
+        guard let age = scalar.properties.age else { return true }
+        return age.major > 3 || (age.major == 3 && age.minor > 2)
+    }
+
+    /// RFC 3454 section 6: a string with right-to-left characters (table D.1) must not contain left-to-right
+    /// ones (table D.2) and must start and end with a right-to-left character.
+    static func satisfiesBidiRule(_ scalars: [Unicode.Scalar]) -> Bool {
+        guard scalars.contains(where: isRandALCat) else { return true }
+        guard let first = scalars.first, let last = scalars.last, isRandALCat(first), isRandALCat(last) else { return false }
+        return !scalars.contains(where: isLCat)
+    }
+
+    /// Table D.1 (characters with bidi property R or AL).
+    static func isRandALCat(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x05BE, 0x05C0, 0x05C3, 0x05D0...0x05EA, 0x05F0...0x05F4, 0x061B, 0x061F, 0x0621...0x063A, 0x0640...0x064A,
+             0x066D...0x066F, 0x0671...0x06D5, 0x06DD, 0x06E5...0x06E6, 0x06FA...0x06FE, 0x0700...0x070D, 0x0710,
+             0x0712...0x072C, 0x0780...0x07A5, 0x07B1, 0x200F, 0xFB1D, 0xFB1F...0xFB28, 0xFB2A...0xFB36, 0xFB38...0xFB3C,
+             0xFB3E, 0xFB40...0xFB41, 0xFB43...0xFB44, 0xFB46...0xFBB1, 0xFBD3...0xFD3D, 0xFD50...0xFD8F, 0xFD92...0xFDC7,
+             0xFDF0...0xFDFC, 0xFE70...0xFE74, 0xFE76...0xFEFC:
+            true
+        default:
+            false
+        }
+    }
+
+    /// Table D.2 (bidi property L), approximated from Unicode properties: letters and spacing marks that are not
+    /// right-to-left. Nonspacing and enclosing marks (bidi NSM), digits and punctuation are not L.
+    static func isLCat(_ scalar: Unicode.Scalar) -> Bool {
+        guard !isRandALCat(scalar), scalar.properties.isAlphabetic else { return false }
+        switch scalar.properties.generalCategory {
+        case .nonspacingMark, .enclosingMark: return false
+        default: return true
+        }
     }
 
     static func isNonASCIISpace(_ scalar: Unicode.Scalar) -> Bool {

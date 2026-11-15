@@ -111,4 +111,19 @@ struct SASLprepTests {
         #expect(SASLprep.prepare("a\u{0007}b") == "a\u{0007}b")
         #expect(SASLprep.prepare("\u{E000}x") == "\u{E000}x")
     }
+
+    /// Review finding 12: like PostgreSQL, passwords with code points unassigned in Unicode 3.2 or violating the
+    /// bidi rule are used unchanged (normalizing them would make SCRAM fail).
+    @Test func unassignedAndBidiViolationsAreUsedAsIs() {
+        // U+2168 normalizes to "IX"; with an emoji (assigned after 3.2) the whole password stays raw.
+        #expect(SASLprep.prepare("\u{2168}\u{1F600}") == "\u{2168}\u{1F600}")
+        #expect(SASLprep.isUnassigned("\u{0221}")) // assigned in Unicode 4.0
+        #expect(!SASLprep.isUnassigned("a"))
+        // Hebrew with a Latin letter, or ending in a digit: bidi violation → raw (ﬠ U+FB20 would otherwise map).
+        #expect(SASLprep.prepare("\u{05D0}a\u{05D1}\u{FB20}") == "\u{05D0}a\u{05D1}\u{FB20}")
+        #expect(SASLprep.prepare("\u{05D0}\u{FB20}1") == "\u{05D0}\u{FB20}1")
+        // Pure right-to-left text (with nonspacing points) is valid and normalized.
+        #expect(SASLprep.prepare("\u{05D0}\u{05B8}\u{FB20}") == "\u{05D0}\u{05B8}\u{05E2}")
+        #expect(SASLprep.prepare("\u{05D0}1\u{05D1}\u{00A0}\u{05D2}") == "\u{05D0}1\u{05D1} \u{05D2}".precomposedStringWithCompatibilityMapping)
+    }
 }

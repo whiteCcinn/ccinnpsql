@@ -108,7 +108,7 @@ extension PostgresClient {
 
     public func schemas(database: String? = nil) async throws -> [SchemaSummary] {
         try await records(CatalogSQL.schemas, database: database).compactMap { row in
-            row.text("nspname").map { SchemaSummary(name: $0, owner: row.text("owner"), comment: row.string("comment")) }
+            row.raw("nspname").map { SchemaSummary(name: $0, owner: row.text("owner"), comment: row.string("comment")) }
         }
     }
 
@@ -138,7 +138,7 @@ extension PostgresClient {
             """, [.text(schemas), .text(names)], database: database)
         var result: [String: [(name: String, type: String)]] = [:]
         for row in rows {
-            guard let schema = row.text("schema"), let table = row.raw("table_name"), let column = row.raw("attname") else { continue }
+            guard let schema = row.raw("schema"), let table = row.raw("table_name"), let column = row.raw("attname") else { continue }
             result["\(schema).\(table)".lowercased(), default: []].append((column, row.text("type") ?? ""))
         }
         return result
@@ -151,9 +151,9 @@ extension PostgresClient {
 
     public func extensions(database: String? = nil) async throws -> [ExtensionSummary] {
         try await records(CatalogSQL.extensions, database: database).compactMap { row in
-            row.text("name").map {
+            row.raw("name").map {
                 ExtensionSummary(name: $0, installedVersion: row.text("installed_version"), defaultVersion: row.text("default_version"),
-                                 schema: row.text("schema"), comment: row.string("comment"))
+                                 schema: row.raw("schema"), comment: row.string("comment"))
             }
         }
     }
@@ -164,7 +164,7 @@ extension PostgresClient {
         return try await records("""
             SELECT e.extname, e.extversion, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace ORDER BY 1
             """, database: database).compactMap { row in
-            row.text("extname").map { InstalledExtension(name: $0, version: row.text("extversion") ?? "", schema: row.text("nspname") ?? "") }
+            row.raw("extname").map { InstalledExtension(name: $0, version: row.text("extversion") ?? "", schema: row.raw("nspname") ?? "") }
         }
     }
 
@@ -176,7 +176,7 @@ extension PostgresClient {
         if let timescale = installed.first(where: { $0.name == "timescaledb" }) {
             do {
                 let rows = try await records(CatalogSQL.hypertables(extensionVersion: timescale.version), database: database)
-                let names = Set(rows.compactMap { row in row.text("schema").flatMap { schema in row.text("name").map { "\(schema).\($0)" } } })
+                let names = Set(rows.compactMap { row in row.raw("schema").flatMap { schema in row.raw("name").map { "\(schema).\($0)" } } })
                 for index in result.indices where names.contains("\(result[index].schema).\(result[index].name)") {
                     result[index].isHypertable = true
                 }
@@ -187,7 +187,7 @@ extension PostgresClient {
                 let rows = try await records(CatalogSQL.citusTables, database: database)
                 var placements: [String: (CitusPlacement, String?)] = [:]
                 for row in rows {
-                    guard let schema = row.text("schema"), let name = row.text("name"),
+                    guard let schema = row.raw("schema"), let name = row.raw("name"),
                           let placement = row.text("placement").flatMap(CitusPlacement.init(rawValue:)) else { continue }
                     placements["\(schema).\(name)"] = (placement, row.text("distribution_column"))
                 }
@@ -206,7 +206,7 @@ extension PostgresClient {
 /// Record → model conversions (pure; unit-tested with recorded rows).
 public enum CatalogParser {
     public static func database(_ row: Record) -> DatabaseSummary? {
-        guard let name = row.text("datname") else { return nil }
+        guard let name = row.raw("datname") else { return nil }
         return DatabaseSummary(name: name, owner: row.text("owner"), encoding: row.text("encoding"), collation: row.text("datcollate"),
                                sizeBytes: row.int("size_bytes"), allowsConnections: row.bool("datallowconn") ?? true,
                                isTemplate: row.bool("datistemplate") ?? false,
@@ -215,7 +215,7 @@ public enum CatalogParser {
     }
 
     public static func relation(_ row: Record) -> RelationSummary? {
-        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.text("schema"), let name = row.raw("name"),
+        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.raw("schema"), let name = row.raw("name"),
               let kind = row.text("relkind").flatMap(RelationKind.init(rawValue:)) else { return nil }
         let tuples = row.double("reltuples")
         return RelationSummary(oid: oid, schema: schema, name: name, kind: kind, persistence: row.text("persistence") ?? "p",
@@ -226,7 +226,7 @@ public enum CatalogParser {
     }
 
     public static func routine(_ row: Record) -> RoutineSummary? {
-        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.text("schema"), let name = row.raw("name"),
+        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.raw("schema"), let name = row.raw("name"),
               let kind = row.text("kind").flatMap(RoutineKind.init(rawValue:)) else { return nil }
         return RoutineSummary(oid: oid, schema: schema, name: name, kind: kind, arguments: row.string("arguments") ?? "",
                               result: row.text("result"), language: row.text("language") ?? "", volatility: row.text("volatility") ?? "v",
@@ -234,7 +234,7 @@ public enum CatalogParser {
     }
 
     public static func type(_ row: Record) -> TypeSummary? {
-        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.text("schema"), let name = row.raw("name"),
+        guard let oid = row.int("oid").flatMap({ UInt32(exactly: $0) }), let schema = row.raw("schema"), let name = row.raw("name"),
               let kind = row.text("kind").flatMap(TypeKind.init(rawValue:)) else { return nil }
         return TypeSummary(oid: oid, schema: schema, name: name, kind: kind, comment: row.string("comment"))
     }
