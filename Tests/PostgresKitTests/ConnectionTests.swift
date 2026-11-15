@@ -63,13 +63,17 @@ struct ConnectionTests {
 
     @Test func connectFromCancelledTaskFailsFast() async throws {
         let network = FakeNetwork()
-        let task = Task {
+        var configuration = fakeConfiguration()
+        configuration.connectTimeout = 30
+        let task = Task { [configuration] in
             withUnsafeCurrentTask { $0?.cancel() }
-            return try await PostgresConnection.connect(fakeConfiguration(), transportFactory: network.factory)
+            return try await PostgresConnection.connect(configuration, transportFactory: network.factory)
         }
         let started = ContinuousClock.now
         await #expect(throws: PostgresError.self) { _ = try await task.value }
-        #expect(ContinuousClock.now - started < .seconds(1))
+        // A cancelled connect must not wait for the 30 s connect timeout. Generous bound: on a busy CI runner the
+        // task itself can wait seconds for a thread.
+        #expect(ContinuousClock.now - started < .seconds(10))
         #expect(network.servers.withLock { $0.isEmpty })
     }
 
@@ -168,7 +172,8 @@ struct ConnectionTests {
         } catch let error as PostgresError {
             #expect(error.kind == .cancelled)
         }
-        #expect(ContinuousClock.now - started < .seconds(3))
+        // The statement never answers, so finishing at all proves cancellation; the bound allows for a busy CI runner.
+        #expect(ContinuousClock.now - started < .seconds(10))
         #expect(await connection.isBroken)
         #expect(network.servers.withLock { $0.first }?.isClosed == true)
     }
@@ -281,7 +286,11 @@ struct CancelCoordinatorTests {
         let coordinator = CancelCoordinator(graceSeconds: 0.1, sender: {}, forceClose: { closed.increment() })
         let generation = coordinator.begin()
         coordinator.cancel(generation: generation, reason: .task)
-        try await Task.sleep(for: .milliseconds(400))
+        // Wait (up to 5 s) for the grace period to run out: a fixed sleep is flaky on a busy CI runner.
+        for _ in 0..<500 {
+            if closed.value > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(closed.value == 1)
 
         // A statement that stops within the grace period keeps its socket.
@@ -304,7 +313,9 @@ struct CancelCoordinatorTests {
         try await Task.sleep(for: .milliseconds(50))
         waiter.cancel()
         await waiter.value
-        #expect(ContinuousClock.now - started < .seconds(1))
+        // The gated delivery never completes on its own, so returning at all proves the waiter honoured
+        // cancellation; the bound allows for a busy CI runner.
+        #expect(ContinuousClock.now - started < .seconds(10))
         sender.gate.open()
     }
 }
@@ -335,7 +346,8 @@ struct LateCancelTests {
     }
 
     @Test func taskCancelledWhileWaitingForACancelKeepsTheConnectionUsable() async throws {
-        let network = FakeNetwork(cancelDelay: 1.0) { index in
+        // The cancel takes 8 s to be delivered; the second statement must not wait for it once cancelled.
+        let network = FakeNetwork(cancelDelay: 8.0) { index in
             FakePostgresServer(pid: Int32(100 + index)) { query in
                 query.contains("slow") ? .delayed(Wire.rows(["x"], [["first"]]), seconds: 0.1) : .bytes(Wire.rows(["x"], [["ok"]]))
             }
@@ -355,7 +367,8 @@ struct LateCancelTests {
         } catch let error as PostgresError {
             #expect(error.kind == .cancelled)
         }
-        #expect(ContinuousClock.now - started < .milliseconds(800))
+        // Well under the 8 s delivery; generous because a busy CI runner adds scheduling delays.
+        #expect(ContinuousClock.now - started < .seconds(6))
         #expect(await connection.isIdle)
         #expect(try await connection.extendedQuery("SELECT after").lastRowSet?.scalar == "ok")
     }
