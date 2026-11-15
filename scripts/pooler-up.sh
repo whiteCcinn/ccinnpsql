@@ -2,6 +2,7 @@
 # Starts PgBouncer (transaction pooling) and Pgpool-II in front of ccinnpsql-it-pg17 (start it first with
 # scripts/pg-up.sh 17). Containers: ccinnpsql-it-pgbouncer (127.0.0.1:15430, admin console database "pgbouncer"),
 # ccinnpsql-it-pgpool (127.0.0.1:15431). Both are capped at 256 MB and joined to the network ccinnpsql-it-net.
+# Run it again before every pooler test run: the terminate check makes Pgpool mark its only backend as down.
 set -euo pipefail
 BACKEND="${CCINNPSQL_IT_BACKEND:-ccinnpsql-it-pg17}"
 docker network inspect ccinnpsql-it-net >/dev/null 2>&1 || docker network create ccinnpsql-it-net >/dev/null

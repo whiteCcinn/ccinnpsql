@@ -1,3 +1,4 @@
+import CcinnPsqlKit
 import Foundation
 import PostgresKit
 import PostgresWire
@@ -30,6 +31,17 @@ struct PoolerIntegrationTests {
         #expect(contents.relations.contains { $0.name == "customers" })
         let binary = try await client.query("SELECT $1::int + 1 AS n, now() AS t", [.text("41")], resultFormat: .binaryWhereSupported)
         #expect(binary.lastRowSet?.scalar == "42")
+        // The metadata lock_timeout rides in the statement's own pipeline, so it holds through transaction pooling.
+        #expect(try await client.records("SELECT current_setting('lock_timeout') AS t").first?.text("t") == "5s")
+        // The MCP read-only runner works through transaction pooling (preamble, statement and epilogue).
+        let profile = ConnectionProfile(name: "PgBouncer", host: "127.0.0.1", port: 15430, username: "ccinn", database: "ccinn", mcpAccess: .readOnly)
+        let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
+                                     registry: MCPClientRegistry { _ in client }, audit: nil)
+        let read = await tools.call(name: "run_query", arguments: [
+            "sql": "SELECT current_setting('standard_conforming_strings') AS scs, count(*) AS n FROM shop.customers",
+        ])
+        #expect(!read.isError, "\(read.payload)")
+        #expect(read.payload["rows"]?[0]?[0] == "on")
 
         // Cancel reaches the server connection running the statement.
         let session = client.openSession()
@@ -87,6 +99,7 @@ struct PoolerIntegrationTests {
         #expect(client.routingPrefix == "/*NO LOAD BALANCE*/ ")
         let snapshot = try await client.activity()
         #expect(!snapshot.sessions.isEmpty)
+        #expect(try await client.records("SELECT current_setting('lock_timeout') AS t").first?.text("t") == "5s")
         let nodes = try await client.poolerReport("POOL_NODES")
         #expect(nodes.lastRowSet?.rows.isEmpty == false)
 
