@@ -16,6 +16,8 @@ enum Wire {
     static func cstring(_ text: String) -> [UInt8] { Array(text.utf8) + [0] }
     static func int16(_ value: Int16) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Array.init) }
     static func int32(_ value: Int32) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Array.init) }
+    /// Concatenates byte arrays. Long `+` chains are too slow for older type checkers (Swift 6.2 in CI).
+    static func concatBytes(_ parts: [UInt8]...) -> [UInt8] { parts.flatMap { $0 } }
 
     static func authOK() -> [UInt8] { message("R", int32(0)) }
     static func ready(_ status: Character = "I") -> [UInt8] { message("Z", [status.asciiValue ?? 0x49]) }
@@ -25,7 +27,7 @@ enum Wire {
 
     static func rowDescription(_ names: [String], type: Int32 = 25) -> [UInt8] {
         var body = int16(Int16(names.count))
-        for name in names { body += cstring(name) + int32(0) + int16(0) + int32(type) + int16(-1) + int32(-1) + int16(0) }
+        for name in names { body += concatBytes(cstring(name), int32(0), int16(0), int32(type), int16(-1), int32(-1), int16(0)) }
         return message("T", body)
     }
 
@@ -51,7 +53,7 @@ enum Wire {
     }
 
     static func rows(_ names: [String], _ values: [[String?]], tag: String? = nil) -> [UInt8] {
-        rowDescription(names) + values.flatMap(dataRow) + complete(tag ?? "SELECT \(values.count)")
+        concatBytes(rowDescription(names), values.flatMap(dataRow), complete(tag ?? "SELECT \(values.count)"))
     }
 }
 
@@ -220,7 +222,7 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
                     enqueue(Wire.authOK() + Wire.ready())
                 }
             default:
-                enqueue(Wire.authOK() + Wire.keyData(pid: pid, key: 99) + Wire.ready())
+                enqueue(Wire.concatBytes(Wire.authOK(), Wire.keyData(pid: pid, key: 99), Wire.ready()))
             }
         case UInt8(ascii: "Q"):
             respond(to: packet.query ?? "", extended: false)
@@ -237,12 +239,12 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
     private func startup() {
         switch auth {
         case .trust:
-            enqueue(Wire.authOK() + Wire.parameter("server_version", "17.2") + Wire.parameter("TimeZone", "UTC")
-                    + Wire.keyData(pid: pid, key: 99) + Wire.ready())
+            enqueue(Wire.concatBytes(Wire.authOK(), Wire.parameter("server_version", "17.2"), Wire.parameter("TimeZone", "UTC"),
+                                     Wire.keyData(pid: pid, key: 99), Wire.ready()))
         case .cleartext:
             enqueue(Wire.message("R", Wire.int32(3)))
         case .scramWithoutFinal:
-            enqueue(Wire.message("R", Wire.int32(10) + Wire.cstring("SCRAM-SHA-256") + [0]))
+            enqueue(Wire.message("R", Wire.concatBytes(Wire.int32(10), Wire.cstring("SCRAM-SHA-256"), [0])))
         case .reject:
             enqueue(Wire.error("28P01", "password authentication failed for user \"x\"", severity: "FATAL"))
         }
@@ -252,17 +254,18 @@ final class FakePostgresServer: ByteTransport, @unchecked Sendable {
         state.withLockUnchecked { $0.queryArrivals.append(ContinuousClock.now) }
         switch handler(query) {
         case let .bytes(bytes):
-            let prefix = extended ? Wire.message("1") + Wire.message("2") : []
-            enqueue(prefix + bytes + Wire.ready())
+            let prefix: [UInt8] = extended ? Wire.concatBytes(Wire.message("1"), Wire.message("2")) : []
+            enqueue(Wire.concatBytes(prefix, bytes, Wire.ready()))
         case let .raw(bytes):
-            let prefix = extended ? Wire.message("1") + Wire.message("2") : []
+            let prefix: [UInt8] = extended ? Wire.concatBytes(Wire.message("1"), Wire.message("2")) : []
             enqueue(prefix + bytes)
         case .hang:
             state.withLockUnchecked { $0.hanging = true }
             if extended { enqueue(Wire.message("1") + Wire.message("2")) }
         case let .partialThenHang(bytes):
             state.withLockUnchecked { $0.hanging = true }
-            enqueue((extended ? Wire.message("1") + Wire.message("2") : []) + bytes)
+            let prefix: [UInt8] = extended ? Wire.concatBytes(Wire.message("1"), Wire.message("2")) : []
+            enqueue(Wire.concatBytes(prefix, bytes))
         case let .delayed(bytes, seconds):
             let generation = state.withLockUnchecked { state -> Int in
                 state.hanging = true

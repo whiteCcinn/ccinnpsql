@@ -17,6 +17,9 @@ func int16(_ value: Int16) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Arr
 func int32(_ value: Int32) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Array.init) }
 func int64(_ value: Int64) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Array.init) }
 
+/// Concatenates byte arrays. Long `+` chains of byte arrays are too slow for older type checkers (Swift 6.2 in CI).
+func concatBytes(_ parts: [UInt8]...) -> [UInt8] { parts.flatMap { $0 } }
+
 @Suite("Byte reader and writer")
 struct ByteReaderTests {
     @Test func readsBigEndianIntegersAndStrings() throws {
@@ -71,11 +74,11 @@ struct FrontendMessageTests {
     @Test func sslRequestAndCancelRequest() throws {
         #expect(FrontendMessage.sslRequest == [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F])
         let cancel = FrontendMessage.cancelRequest(processID: 4242, secretKey: [1, 2, 3, 4])
-        #expect(cancel == [0, 0, 0, 16, 0x04, 0xD2, 0x16, 0x2E] + int32(4242) + [1, 2, 3, 4])
+        #expect(cancel == concatBytes([0, 0, 0, 16, 0x04, 0xD2, 0x16, 0x2E], int32(4242), [1, 2, 3, 4]))
     }
 
     @Test func queryMessage() {
-        #expect(FrontendMessage.query("SELECT 1") == [UInt8(ascii: "Q")] + int32(13) + cstring("SELECT 1"))
+        #expect(FrontendMessage.query("SELECT 1") == concatBytes([UInt8(ascii: "Q")], int32(13), cstring("SELECT 1")))
     }
 
     @Test func extendedQuerySequence() throws {
@@ -109,8 +112,8 @@ struct FrontendMessageTests {
         #expect(try reader.readInt16() == 1)
         #expect(reader.isAtEnd)
 
-        #expect(FrontendMessage.describe(.portal, name: "") == [UInt8(ascii: "D")] + int32(6) + [UInt8(ascii: "P"), 0])
-        #expect(FrontendMessage.execute(portal: "", maxRows: 0) == [UInt8(ascii: "E")] + int32(9) + [0] + int32(0))
+        #expect(FrontendMessage.describe(.portal, name: "") == concatBytes([UInt8(ascii: "D")], int32(6), [UInt8(ascii: "P"), 0]))
+        #expect(FrontendMessage.execute(portal: "", maxRows: 0) == concatBytes([UInt8(ascii: "E")], int32(9), [0], int32(0)))
         #expect(FrontendMessage.sync == [UInt8(ascii: "S"), 0, 0, 0, 4])
         #expect(FrontendMessage.flush == [UInt8(ascii: "H"), 0, 0, 0, 4])
         #expect(FrontendMessage.terminate == [UInt8(ascii: "X"), 0, 0, 0, 4])
@@ -123,8 +126,8 @@ struct FrontendMessageTests {
         #expect(try reader.readCString() == "SCRAM-SHA-256")
         #expect(try reader.readInt32() == 11)
         #expect(Array(try reader.readBytes(11)) == Array("n,,n=,r=abc".utf8))
-        #expect(FrontendMessage.saslResponse([9, 8]) == [UInt8(ascii: "p")] + int32(6) + [9, 8])
-        #expect(FrontendMessage.copyFail("no") == [UInt8(ascii: "f")] + int32(7) + cstring("no"))
+        #expect(FrontendMessage.saslResponse([9, 8]) == concatBytes([UInt8(ascii: "p")], int32(6), [9, 8]))
+        #expect(FrontendMessage.copyFail("no") == concatBytes([UInt8(ascii: "f")], int32(7), cstring("no")))
     }
 }
 
@@ -157,7 +160,7 @@ struct MessageDecoderTests {
 
     @Test func compactsConsumedBytes() throws {
         var decoder = MessageDecoder()
-        let message = backend("D", int16(1) + int32(3) + Array("abc".utf8))
+        let message = backend("D", concatBytes(int16(1), int32(3), Array("abc".utf8)))
         for _ in 0..<50_000 {
             decoder.append(message)
             _ = try decoder.next()
@@ -176,7 +179,7 @@ struct MessageDecoderTests {
         guard case let .authentication(.md5Password(salt)) = try parse(backend("R", int32(5) + [1, 2, 3, 4])), salt == [1, 2, 3, 4] else {
             Issue.record("md5"); return
         }
-        guard case let .authentication(.sasl(mechanisms)) = try parse(backend("R", int32(10) + cstring("SCRAM-SHA-256-PLUS") + cstring("SCRAM-SHA-256") + [0])),
+        guard case let .authentication(.sasl(mechanisms)) = try parse(backend("R", concatBytes(int32(10), cstring("SCRAM-SHA-256-PLUS"), cstring("SCRAM-SHA-256"), [0]))),
               mechanisms == ["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"] else { Issue.record("sasl"); return }
         guard case let .authentication(.saslContinue(data)) = try parse(backend("R", int32(11) + [7, 7])), data == [7, 7] else { Issue.record("cont"); return }
         guard case .authentication(.unsupported(7)) = try parse(backend("R", int32(7))) else { Issue.record("gss"); return }
@@ -192,25 +195,26 @@ struct MessageDecoderTests {
         guard case .closeComplete = try parse(backend("3", [])) else { Issue.record("3"); return }
         guard case .noData = try parse(backend("n", [])) else { Issue.record("n"); return }
         guard case .portalSuspended = try parse(backend("s", [])) else { Issue.record("s"); return }
-        guard case let .parameterDescription(types) = try parse(backend("t", int16(2) + int32(23) + int32(25))), types == [23, 25] else {
+        guard case let .parameterDescription(types) = try parse(backend("t", concatBytes(int16(2), int32(23), int32(25)))), types == [23, 25] else {
             Issue.record("t"); return
         }
-        guard case let .notification(note) = try parse(backend("A", int32(9) + cstring("jobs") + cstring("done"))),
+        guard case let .notification(note) = try parse(backend("A", concatBytes(int32(9), cstring("jobs"), cstring("done")))),
               note.processID == 9, note.channel == "jobs", note.payload == "done" else { Issue.record("A"); return }
-        guard case let .copyOutResponse(format) = try parse(backend("H", [0] + int16(2) + int16(0) + int16(0))),
+        guard case let .copyOutResponse(format) = try parse(backend("H", concatBytes([0], int16(2), int16(0), int16(0)))),
               format.isBinary == false, format.columnFormats.count == 2 else { Issue.record("H"); return }
         guard case .copyInResponse = try parse(backend("G", [0] + int16(0))) else { Issue.record("G"); return }
         guard case let .copyData(data) = try parse(backend("d", [1, 2])), Array(data) == [1, 2] else { Issue.record("d"); return }
         guard case .copyDone = try parse(backend("c", [])) else { Issue.record("c"); return }
-        guard case let .negotiateProtocolVersion(minor, options) = try parse(backend("v", int32(0) + int32(1) + cstring("_pq_.x"))),
+        guard case let .negotiateProtocolVersion(minor, options) = try parse(backend("v", concatBytes(int32(0), int32(1), cstring("_pq_.x")))),
               minor == 0, options == ["_pq_.x"] else { Issue.record("v"); return }
         guard case .unknown(UInt8(ascii: "?")) = try parse(backend("?", [])) else { Issue.record("unknown"); return }
     }
 
     @Test func rowDescriptionAndDataRow() throws {
-        let description = int16(2)
-            + cstring("id") + int32(16_384) + int16(1) + int32(23) + int16(4) + int32(-1) + int16(0)
-            + cstring("name") + int32(0) + int16(0) + int32(25) + int16(-1) + int32(-1) + int16(1)
+        let description = concatBytes(
+            int16(2),
+            cstring("id"), int32(16_384), int16(1), int32(23), int16(4), int32(-1), int16(0),
+            cstring("name"), int32(0), int16(0), int32(25), int16(-1), int32(-1), int16(1))
         var decoder = MessageDecoder()
         decoder.append(backend("T", description))
         guard let raw = try decoder.next(), case let .rowDescription(fields) = try raw.parse() else { Issue.record("T"); return }
@@ -221,7 +225,7 @@ struct MessageDecoderTests {
         #expect(fields[0].typeOID == 23)
         #expect(fields[1].format == .binary)
 
-        let cells = try DataRow.cells(int16(3) + int32(2) + Array("42".utf8) + int32(-1) + int32(0))
+        let cells = try DataRow.cells(concatBytes(int16(3), int32(2), Array("42".utf8), int32(-1), int32(0)))
         #expect(cells.count == 3)
         #expect(cells[0].map(Array.init) == Array("42".utf8))
         #expect(cells[1] == nil)
@@ -229,17 +233,18 @@ struct MessageDecoderTests {
     }
 
     @Test func dataRowRejectsLiesAboutLengths() {
-        #expect(throws: PostgresWireError.self) { _ = try DataRow.cells(int16(1) + int32(10) + [1, 2]) }
+        #expect(throws: PostgresWireError.self) { _ = try DataRow.cells(concatBytes(int16(1), int32(10), [1, 2])) }
         #expect(throws: PostgresWireError.self) { _ = try DataRow.cells(int16(-1)) }
         #expect(throws: PostgresWireError.self) { _ = try DataRow.cells(int16(1) + int32(-7)) }
     }
 
     @Test func errorResponseFields() throws {
-        let body = [UInt8(ascii: "S")] + cstring("ERROR") + [UInt8(ascii: "V")] + cstring("ERROR")
-            + [UInt8(ascii: "C")] + cstring("42P01") + [UInt8(ascii: "M")] + cstring("relation \"nope\" does not exist")
-            + [UInt8(ascii: "P")] + cstring("15") + [UInt8(ascii: "H")] + cstring("Check the name.")
-            + [UInt8(ascii: "q")] + cstring("SELECT 1") + [UInt8(ascii: "p")] + cstring("3") + [UInt8(ascii: "W")] + cstring("PL/pgSQL function f()")
-            + [UInt8(ascii: "s")] + cstring("public") + [UInt8(ascii: "t")] + cstring("t") + [UInt8(ascii: "n")] + cstring("t_pkey") + [0]
+        let body = concatBytes(
+            [UInt8(ascii: "S")], cstring("ERROR"), [UInt8(ascii: "V")], cstring("ERROR"),
+            [UInt8(ascii: "C")], cstring("42P01"), [UInt8(ascii: "M")], cstring("relation \"nope\" does not exist"),
+            [UInt8(ascii: "P")], cstring("15"), [UInt8(ascii: "H")], cstring("Check the name."),
+            [UInt8(ascii: "q")], cstring("SELECT 1"), [UInt8(ascii: "p")], cstring("3"), [UInt8(ascii: "W")], cstring("PL/pgSQL function f()"),
+            [UInt8(ascii: "s")], cstring("public"), [UInt8(ascii: "t")], cstring("t"), [UInt8(ascii: "n")], cstring("t_pkey"), [0])
         var decoder = MessageDecoder()
         decoder.append(backend("E", body))
         guard let raw = try decoder.next(), case let .errorResponse(fields) = try raw.parse() else { Issue.record("E"); return }
@@ -257,7 +262,7 @@ struct MessageDecoderTests {
     }
 
     @Test func errorPositionRejectsGarbage() throws {
-        let body = [UInt8(ascii: "P")] + cstring("99999999999999999999") + [UInt8(ascii: "M")] + cstring("x") + [0]
+        let body = concatBytes([UInt8(ascii: "P")], cstring("99999999999999999999"), [UInt8(ascii: "M")], cstring("x"), [0])
         var decoder = MessageDecoder()
         decoder.append(backend("E", body))
         guard let raw = try decoder.next(), case let .errorResponse(fields) = try raw.parse() else { Issue.record("E"); return }
@@ -287,11 +292,11 @@ struct WireFuzzTests {
         var generator = SplitMix64(seed: 0xC0FFEE)
         let types: [UInt8] = Array("RKSZTDCIEN123ntsAGHWdcvV?".utf8)
         let seeds: [[UInt8]] = [
-            backend("T", int16(1) + cstring("a") + int32(0) + int16(0) + int32(23) + int16(4) + int32(-1) + int16(0)),
-            backend("E", [UInt8(ascii: "M")] + cstring("x") + [0]),
-            backend("R", int32(10) + cstring("SCRAM-SHA-256") + [0]),
-            backend("A", int32(1) + cstring("c") + cstring("p")),
-            backend("H", [0] + int16(1) + int16(0)),
+            backend("T", concatBytes(int16(1), cstring("a"), int32(0), int16(0), int32(23), int16(4), int32(-1), int16(0))),
+            backend("E", concatBytes([UInt8(ascii: "M")], cstring("x"), [0])),
+            backend("R", concatBytes(int32(10), cstring("SCRAM-SHA-256"), [0])),
+            backend("A", concatBytes(int32(1), cstring("c"), cstring("p"))),
+            backend("H", concatBytes([0], int16(1), int16(0))),
         ]
         for iteration in 0..<20_000 {
             var bytes: [UInt8]

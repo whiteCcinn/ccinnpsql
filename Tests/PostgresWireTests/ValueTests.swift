@@ -38,7 +38,7 @@ struct BinaryValueTests {
 
     @Test func numeric() {
         func numeric(_ weight: Int16, _ sign: UInt16, _ dscale: Int16, _ digits: [Int16]) -> [UInt8] {
-            int16(Int16(digits.count)) + int16(weight) + withUnsafeBytes(of: sign.bigEndian, Array.init) + int16(dscale) + digits.flatMap { int16($0) }
+            concatBytes(int16(Int16(digits.count)), int16(weight), withUnsafeBytes(of: sign.bigEndian, Array.init), int16(dscale), digits.flatMap { int16($0) })
         }
         #expect(text(.numeric, numeric(0, 0, 0, [])) == "0")
         #expect(text(.numeric, numeric(0, 0, 2, [])) == "0.00")
@@ -94,7 +94,7 @@ struct BinaryValueTests {
 
     @Test func intervalsUsePostgresStyle() {
         func interval(_ micros: Int64, _ days: Int32, _ months: Int32) -> String? {
-            text(.interval, int64(micros) + int32(days) + int32(months))
+            text(.interval, concatBytes(int64(micros), int32(days), int32(months)))
         }
         #expect(interval(0, 0, 0) == "00:00:00")
         #expect(interval(14_706_789_000, 3, 14) == "1 year 2 mons 3 days 04:05:06.789")
@@ -112,10 +112,10 @@ struct BinaryValueTests {
         #expect(text(.inet, [2, 32, 0, 4, 192, 168, 1, 10]) == "192.168.1.10")
         #expect(text(.inet, [2, 24, 0, 4, 10, 0, 0, 1]) == "10.0.0.1/24")
         #expect(text(.cidr, [2, 32, 1, 4, 10, 0, 0, 1]) == "10.0.0.1/32")
-        #expect(text(.inet, [3, 128, 0, 16] + [0x20, 0x01, 0x0D, 0xB8] + [UInt8](repeating: 0, count: 11) + [1]) == "2001:db8::1")
-        #expect(text(.inet, [3, 128, 0, 16] + [UInt8](repeating: 0, count: 15) + [1]) == "::1")
-        #expect(text(.inet, [3, 128, 0, 16] + [UInt8](repeating: 0, count: 10) + [0xFF, 0xFF, 1, 2, 3, 4]) == "::ffff:1.2.3.4")
-        #expect(text(.cidr, [3, 64, 1, 16] + [0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 1] + [UInt8](repeating: 0, count: 8)) == "2001:db8:0:1::/64")
+        #expect(text(.inet, concatBytes([3, 128, 0, 16], [0x20, 0x01, 0x0D, 0xB8], [UInt8](repeating: 0, count: 11), [1])) == "2001:db8::1")
+        #expect(text(.inet, concatBytes([3, 128, 0, 16], [UInt8](repeating: 0, count: 15), [1])) == "::1")
+        #expect(text(.inet, concatBytes([3, 128, 0, 16], [UInt8](repeating: 0, count: 10), [0xFF, 0xFF, 1, 2, 3, 4])) == "::ffff:1.2.3.4")
+        #expect(text(.cidr, concatBytes([3, 64, 1, 16], [0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 1], [UInt8](repeating: 0, count: 8))) == "2001:db8:0:1::/64")
         #expect(text(.inet, [2, 32, 0, 3, 1, 2, 3]) == nil)
         #expect(text(.macaddr, [0x08, 0x00, 0x2B, 0x01, 0x02, 0x03]) == "08:00:2b:01:02:03")
     }
