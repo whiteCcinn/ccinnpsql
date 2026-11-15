@@ -38,8 +38,16 @@ enum Wire {
     }
 
     static func error(_ code: String, _ text: String, severity: String = "ERROR") -> [UInt8] {
-        message("E", [UInt8(ascii: "S")] + cstring(severity) + [UInt8(ascii: "V")] + cstring(severity) + [UInt8(ascii: "C")] + cstring(code)
-                + [UInt8(ascii: "M")] + cstring(text) + [0])
+        // Built field by field: one long `+` chain is too slow for older type checkers (Swift 6.2 in CI).
+        var body: [UInt8] = []
+        let fields: [(UInt8, String)] = [(UInt8(ascii: "S"), severity), (UInt8(ascii: "V"), severity),
+                                         (UInt8(ascii: "C"), code), (UInt8(ascii: "M"), text)]
+        for (field, value) in fields {
+            body.append(field)
+            body.append(contentsOf: cstring(value))
+        }
+        body.append(0)
+        return message("E", body)
     }
 
     static func rows(_ names: [String], _ values: [[String?]], tag: String? = nil) -> [UInt8] {

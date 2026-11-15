@@ -80,7 +80,15 @@ struct FrontendMessageTests {
 
     @Test func extendedQuerySequence() throws {
         let parse = FrontendMessage.parse(statement: "", query: "SELECT $1::int", parameterTypes: [23])
-        #expect(parse == [UInt8(ascii: "P")] + int32(Int32(4 + 1 + 15 + 2 + 4)) + [0] + cstring("SELECT $1::int") + int16(1) + int32(23))
+        // Built step by step: one long `+` chain is too slow for older type checkers (Swift 6.2 in CI).
+        let parseLength: Int32 = 4 + 1 + 15 + 2 + 4
+        var expectedParse: [UInt8] = [UInt8(ascii: "P")]
+        expectedParse.append(contentsOf: int32(parseLength))
+        expectedParse.append(0)
+        expectedParse.append(contentsOf: cstring("SELECT $1::int"))
+        expectedParse.append(contentsOf: int16(1))
+        expectedParse.append(contentsOf: int32(23))
+        #expect(parse == expectedParse)
 
         let bind = FrontendMessage.bind(portal: "", statement: "", parameters: [.text("42"), .null, .binary([1])], resultFormats: [.binary])
         var reader = ByteReader(Array(bind.dropFirst(5)))
