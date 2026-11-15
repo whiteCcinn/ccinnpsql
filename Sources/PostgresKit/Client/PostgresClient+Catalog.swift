@@ -19,6 +19,20 @@ public enum CatalogSQL {
         ORDER BY n.nspname
         """
 
+    /// SQL that is true when no AccessExclusiveLock is held or awaited on relation `oid`, its TOAST table or its
+    /// indexes. The size functions take AccessShareLock: on a relation under (or queued for) DDL they would wait
+    /// behind it and make the lock queue longer, stalling the sidebar. Such relations get no size instead.
+    public static func sizeIsLockFree(_ oid: String, toast: String? = nil) -> String {
+        let locked = """
+            coalesce((SELECT array_agg(l.relation) FROM pg_locks l WHERE l.locktype = 'relation' AND l.mode = 'AccessExclusiveLock' \
+            AND l.database = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())), '{}'::oid[])
+            """
+        var conditions = ["\(oid) <> ALL(\(locked))"]
+        if let toast { conditions.append("\(toast) <> ALL(\(locked))") }
+        conditions.append("NOT EXISTS (SELECT 1 FROM pg_index li WHERE li.indrelid = \(oid) AND li.indexrelid = ANY(\(locked)))")
+        return "(" + conditions.joined(separator: " AND ") + ")"
+    }
+
     /// Relations of schema `$1`.
     public static func relations(_ version: ServerVersion) -> String {
         let partitionColumns = version.atLeast(10)
@@ -27,7 +41,7 @@ public enum CatalogSQL {
         return """
         SELECT c.oid::text AS oid, n.nspname AS schema, c.relname AS name, c.relkind::text AS relkind, c.relpersistence::text AS persistence,
                \(partitionColumns), c.relhassubclass, c.reltuples::float8 AS reltuples,
-               CASE WHEN c.relkind IN ('r','m','t','f') THEN pg_total_relation_size(c.oid) END AS total_bytes,
+               CASE WHEN c.relkind IN ('r','m','t','f') AND \(sizeIsLockFree("c.oid", toast: "c.reltoastrelid")) THEN pg_total_relation_size(c.oid) END AS total_bytes,
                pg_get_userbyid(c.relowner) AS owner, obj_description(c.oid, 'pg_class') AS comment,
                (SELECT i.inhparent::text FROM pg_inherits i WHERE i.inhrelid = c.oid ORDER BY i.inhseqno LIMIT 1) AS parent_oid
         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

@@ -141,20 +141,30 @@ public actor PostgresConnection {
 
     /// Extended query protocol with the unnamed statement and portal: exactly one statement, optional `$n`
     /// parameters, text or binary results. The row limit stops the server with Execute's row count.
+    /// `lockTimeout` (text results only) bounds how long the statement may wait for a lock: a transaction-local
+    /// `lock_timeout` is set in the same pipeline, before the same Sync, so it ends with the statement.
     public func extendedQuery(_ sql: String, parameters: [BindValue] = [], parameterTypes: [UInt32] = [],
-                              resultFormat: ResultFormat = .text, limits: RowLimits = RowLimits()) async throws -> QueryResult {
+                              resultFormat: ResultFormat = .text, limits: RowLimits = RowLimits(),
+                              lockTimeout: Double? = nil) async throws -> QueryResult {
         try Self.validate(sql)
         let maxRows = limits.maxRows >= Int(Int32.max) - 1 ? 0 : Int32(limits.maxRows + 1)
         return try await perform { channel, run in
             var reader = QueryReader(limits: limits, run: run, timeZone: run.timeZone, extended: true)
             switch resultFormat {
             case .text:
-                try await channel.send(FrontendMessage.parse(statement: "", query: sql, parameterTypes: parameterTypes)
+                let prelude = lockTimeout.map(Self.lockTimeoutPrelude) ?? []
+                try await channel.send(prelude
+                    + FrontendMessage.parse(statement: "", query: sql, parameterTypes: parameterTypes)
                     + FrontendMessage.bind(portal: "", statement: "", parameters: parameters, resultFormats: [])
                     + FrontendMessage.describe(.portal, name: "")
                     + FrontendMessage.execute(portal: "", maxRows: maxRows)
                     + FrontendMessage.sync)
-                return try await reader.readUntilReady(&channel)
+                var result = try await reader.readUntilReady(&channel)
+                if !prelude.isEmpty, result.results.first?.columns.map(\.name) == [Self.lockTimeoutColumn] {
+                    result.results.removeFirst()
+                    result.completedStatements = max(0, result.completedStatements - 1)
+                }
+                return result
             case .binaryWhereSupported:
                 try await channel.send(FrontendMessage.parse(statement: "", query: sql, parameterTypes: parameterTypes)
                     + FrontendMessage.describe(.statement, name: "")
@@ -171,6 +181,18 @@ public actor PostgresConnection {
                 return try await reader.readUntilReady(&channel)
             }
         }
+    }
+
+    static let lockTimeoutColumn = "ccinnpsql_lock_timeout"
+
+    /// `set_config(…, true)` lasts until the end of the transaction, which in the extended protocol is the Sync
+    /// after the statement (no `SET LOCAL` warning, no explicit transaction left behind on errors).
+    static func lockTimeoutPrelude(_ seconds: Double) -> [UInt8] {
+        let milliseconds = seconds.isFinite ? max(1, Int(seconds * 1000)) : 0
+        return FrontendMessage.parse(statement: "", query: "SELECT set_config('lock_timeout', $1, true) AS \(lockTimeoutColumn)")
+            + FrontendMessage.bind(portal: "", statement: "", parameters: [.text(String(milliseconds))], resultFormats: [])
+            + FrontendMessage.describe(.portal, name: "")
+            + FrontendMessage.execute(portal: "", maxRows: 0)
     }
 
     /// Streams `COPY … TO STDOUT` data to `sink` (one chunk per CopyData message). Returns the command tag.

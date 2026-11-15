@@ -40,7 +40,7 @@ public enum InsightSQL {
         SELECT i.indexrelid::text AS oid, ic.relname AS name, pg_get_indexdef(i.indexrelid) AS definition, am.amname AS method,
                i.indisunique, i.indisprimary, i.indisvalid, i.indkey::text AS indkey,
                (SELECT con.conname FROM pg_constraint con WHERE con.conindid = i.indexrelid AND con.conrelid = i.indrelid LIMIT 1) AS constraint_name,
-               pg_relation_size(i.indexrelid) AS size_bytes, s.idx_scan, s.idx_tup_read, s.idx_tup_fetch,
+               CASE WHEN \(CatalogSQL.sizeIsLockFree("i.indexrelid")) THEN pg_relation_size(i.indexrelid) END AS size_bytes, s.idx_scan, s.idx_tup_read, s.idx_tup_fetch,
                ic.reltuples::float8 AS reltuples, ic.relpages::bigint AS relpages, \(lastScan) AS last_scan,
                (SELECT split_part(o, '=', 2) FROM unnest(ic.reloptions) o WHERE o LIKE 'fillfactor=%' LIMIT 1) AS fillfactor
         FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_am am ON am.oid = ic.relam
@@ -60,7 +60,8 @@ public enum InsightSQL {
         let bound = version.atLeast(10) ? "pg_get_expr(c.relpartbound, c.oid)" : "NULL::text"
         return """
         SELECT c.oid::text AS oid, n.nspname AS schema, c.relname AS name, \(bound) AS bound, c.relkind::text AS relkind,
-               CASE WHEN c.relkind IN ('r','m','f') THEN pg_total_relation_size(c.oid) END AS total_bytes, c.reltuples::float8 AS reltuples
+               CASE WHEN c.relkind IN ('r','m','f') AND \(CatalogSQL.sizeIsLockFree("c.oid", toast: "c.reltoastrelid")) THEN pg_total_relation_size(c.oid) END AS total_bytes,
+               c.reltuples::float8 AS reltuples
         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE i.inhparent = $1::oid ORDER BY c.relname
         """
@@ -79,8 +80,7 @@ public enum InsightSQL {
         let sinceVacuum = version.atLeast(13) ? "s.n_ins_since_vacuum" : "NULL::bigint"
         let lastSeqScan = version.atLeast(16) ? "s.last_seq_scan" : "NULL::timestamptz"
         return """
-        SELECT pg_relation_size(c.oid) AS heap_bytes, pg_total_relation_size(c.oid) AS total_bytes, pg_indexes_size(c.oid) AS index_bytes,
-               CASE WHEN c.reltoastrelid <> 0 THEN pg_total_relation_size(c.reltoastrelid) ELSE 0 END AS toast_bytes,
+        SELECT sized.heap_bytes, sized.total_bytes, sized.index_bytes, sized.toast_bytes,
                c.reltuples::float8 AS reltuples, c.relpages::bigint AS relpages,
                CASE WHEN c.relkind IN ('r','m','t') THEN age(c.relfrozenxid) END AS xid_age,
                s.seq_scan, s.seq_tup_read, s.idx_scan, s.idx_tup_fetch, s.n_tup_ins, s.n_tup_upd, s.n_tup_del, s.n_tup_hot_upd,
@@ -89,6 +89,11 @@ public enum InsightSQL {
                s.analyze_count, s.autoanalyze_count, \(lastSeqScan) AS last_seq_scan,
                io.heap_blks_read, io.heap_blks_hit, current_setting('block_size') AS block_size, c.reloptions::text AS reloptions
         FROM pg_class c LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid LEFT JOIN pg_statio_all_tables io ON io.relid = c.oid
+        LEFT JOIN LATERAL (
+            SELECT pg_relation_size(c.oid) AS heap_bytes, pg_total_relation_size(c.oid) AS total_bytes, pg_indexes_size(c.oid) AS index_bytes,
+                   CASE WHEN c.reltoastrelid <> 0 THEN pg_total_relation_size(c.reltoastrelid) ELSE 0 END AS toast_bytes
+            WHERE \(CatalogSQL.sizeIsLockFree("c.oid", toast: "c.reltoastrelid"))
+        ) sized ON true
         WHERE c.oid = $1::oid
         """
     }

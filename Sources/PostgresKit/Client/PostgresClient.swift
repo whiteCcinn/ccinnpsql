@@ -21,6 +21,9 @@ public final class PostgresClient: Sendable {
 
     /// Default per-statement budget for metadata queries issued by the app itself.
     public static let metadataTimeout: Double = 30
+    /// How long a metadata query may wait for a table lock (catalog functions such as `pg_get_indexdef` and the
+    /// size functions take AccessShareLock, which queues behind DDL): fail fast instead of stalling the UI.
+    public static let metadataLockTimeout: Double = 5
 
     private init(configuration: ConnectionConfiguration, effectiveConfiguration: ConnectionConfiguration, serverInfo: ServerInfo,
                  pool: ConnectionPool, poolSize: Int, transportFactory: @escaping TransportFactory, tunnel: SSHTunnel?) {
@@ -108,10 +111,12 @@ public final class PostgresClient: Sendable {
     /// Runs one statement through the extended protocol on a pooled connection. On timeout or cancellation the
     /// statement is cancelled with a CancelRequest; the connection returns to the pool when the server confirmed.
     public func query(_ sql: String, _ parameters: [BindValue] = [], database: String? = nil, resultFormat: ResultFormat = .text,
-                      limits: RowLimits = .metadata, timeout: Double? = PostgresClient.metadataTimeout) async throws -> QueryResult {
-        try await pool(for: database).withConnection { connection in
+                      limits: RowLimits = .metadata, timeout: Double? = PostgresClient.metadataTimeout,
+                      lockTimeout: Double? = PostgresClient.metadataLockTimeout) async throws -> QueryResult {
+        let lockTimeout = serverInfo.isPgBouncerConsole ? nil : lockTimeout
+        return try await pool(for: database).withConnection { connection in
             try await Self.withTimeout(timeout) {
-                try await connection.extendedQuery(sql, parameters: parameters, resultFormat: resultFormat, limits: limits)
+                try await connection.extendedQuery(sql, parameters: parameters, resultFormat: resultFormat, limits: limits, lockTimeout: lockTimeout)
             }
         }
     }
@@ -124,8 +129,9 @@ public final class PostgresClient: Sendable {
 
     /// Records of the last row set of `sql` (metadata helper).
     public func records(_ sql: String, _ parameters: [BindValue] = [], database: String? = nil,
-                        timeout: Double? = PostgresClient.metadataTimeout) async throws -> [Record] {
-        try await query(sql, parameters, database: database, timeout: timeout).records
+                        timeout: Double? = PostgresClient.metadataTimeout,
+                        lockTimeout: Double? = PostgresClient.metadataLockTimeout) async throws -> [Record] {
+        try await query(sql, parameters, database: database, timeout: timeout, lockTimeout: lockTimeout).records
     }
 
     /// Simple-protocol batch on a pooled connection (scripts, PgBouncer console).

@@ -217,3 +217,24 @@ struct ListenerTests {
         }
     }
 }
+
+@Suite("Metadata lock timeout")
+struct LockTimeoutTests {
+    /// Review finding 11: the transaction-local lock_timeout travels in the statement's own pipeline (no Sync of
+    /// its own), so it ends with the statement and costs no extra round trip.
+    @Test func preludeSharesTheStatementsSync() throws {
+        let prelude = PostgresConnection.lockTimeoutPrelude(5)
+        var types: [Character] = []
+        var reader = ByteReader(prelude)
+        while !reader.isAtEnd {
+            let type = try reader.readUInt8()
+            let length = try reader.readInt32()
+            _ = try reader.readBytes(Int(length) - 4)
+            types.append(Character(Unicode.Scalar(type)))
+        }
+        #expect(types == ["P", "B", "D", "E"])
+        let text = String(decoding: prelude, as: UTF8.self)
+        #expect(text.contains("set_config('lock_timeout', $1, true)"))
+        #expect(text.contains("5000"))
+    }
+}

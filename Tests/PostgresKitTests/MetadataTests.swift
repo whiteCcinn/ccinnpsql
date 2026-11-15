@@ -142,6 +142,11 @@ struct VersionTests {
         #expect(InsightSQL.columns(old).contains("''::text AS identity"))
         #expect(InsightSQL.columns(modern).contains("a.attgenerated"))
         #expect(InsightSQL.sequence(old).contains("NULL::bigint AS start_value"))
+        // Review finding 11: size functions are skipped for relations under (or queued for) an AccessExclusiveLock.
+        for sql in [CatalogSQL.relations(modern), InsightSQL.indexes(modern), InsightSQL.children(modern), InsightSQL.statistics(modern),
+                    OperationsSQL.maintenance, OperationsSQL.unusedIndexes] {
+            #expect(sql.contains("AccessExclusiveLock"), "\(sql.prefix(60))")
+        }
         // Review finding 6: pg_range.rngmultitypid exists only on PostgreSQL 14+.
         #expect(!InsightSQL.rangeSubtype(ServerVersion(major: 13)).contains("rngmultitypid"))
         #expect(!InsightSQL.rangeSubtype(old).contains("rngmultitypid"))

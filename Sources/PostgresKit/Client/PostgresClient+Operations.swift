@@ -176,17 +176,19 @@ public enum OperationsSQL {
 
     public static let maintenance = """
         SELECT s.schemaname, s.relname, s.n_live_tup, s.n_dead_tup, greatest(s.last_vacuum, s.last_autovacuum) AS last_vacuum,
-               greatest(s.last_analyze, s.last_autoanalyze) AS last_analyze, age(c.relfrozenxid) AS xid_age, pg_total_relation_size(s.relid) AS total_bytes
+               greatest(s.last_analyze, s.last_autoanalyze) AS last_analyze, age(c.relfrozenxid) AS xid_age,
+               CASE WHEN \(CatalogSQL.sizeIsLockFree("c.oid", toast: "c.reltoastrelid")) THEN pg_total_relation_size(s.relid) END AS total_bytes
         FROM pg_stat_user_tables s JOIN pg_class c ON c.oid = s.relid
         ORDER BY s.n_dead_tup DESC NULLS LAST, age(c.relfrozenxid) DESC LIMIT $1::int
         """
 
     public static let unusedIndexes = """
-        SELECT s.schemaname, s.relname, s.indexrelname, s.idx_scan, pg_relation_size(s.indexrelid) AS size_bytes, i.indisunique
+        SELECT s.schemaname, s.relname, s.indexrelname, s.idx_scan,
+               CASE WHEN \(CatalogSQL.sizeIsLockFree("s.indexrelid")) THEN pg_relation_size(s.indexrelid) END AS size_bytes, i.indisunique
         FROM pg_stat_user_indexes s JOIN pg_index i ON i.indexrelid = s.indexrelid
         WHERE s.idx_scan = 0 AND NOT i.indisunique AND NOT i.indisprimary
           AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = s.indexrelid)
-        ORDER BY pg_relation_size(s.indexrelid) DESC LIMIT $1::int
+        ORDER BY size_bytes DESC NULLS LAST LIMIT $1::int
         """
 }
 

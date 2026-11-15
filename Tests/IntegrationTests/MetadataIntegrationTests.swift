@@ -120,6 +120,11 @@ struct MetadataIntegrationTests {
         #expect(try await client.typeDetail(status).enumLabels == ["new", "paid", "shipped", "cancelled"])
         let email = try #require(contents.types.first { $0.name == "email" })
         #expect(try await client.typeDetail(email).baseType == "text")
+        // Review finding 6: range types open on every version (pg_range.rngmultitypid is PostgreSQL 14+).
+        _ = try await client.simpleQuery("DROP TYPE IF EXISTS public.ccinnpsql_it_range; CREATE TYPE public.ccinnpsql_it_range AS RANGE (subtype = numeric)")
+        let range = try #require(try await client.schemaContents("public").types.first { $0.name == "ccinnpsql_it_range" })
+        #expect(try await client.typeDetail(range).baseType == "numeric")
+        _ = try await client.simpleQuery("DROP TYPE public.ccinnpsql_it_range")
         #expect(try await client.grants(of: customers).contains { $0.grantee == "ccinn" && $0.privilege == "SELECT" })
 
         let preview = try await client.preview(orders, limit: 5)
@@ -199,6 +204,40 @@ struct MetadataIntegrationTests {
         #expect(maintenance.contains { $0.name == "products" })
         let unused = try await client.unusedIndexes()
         #expect(unused.contains { $0.index == "products_unused_idx" })
+    }
+
+    /// Review finding 11: browsing a schema must not wait behind DDL on one of its tables (the size functions
+    /// take AccessShareLock); the locked table simply has no size.
+    @Test(arguments: IT.versions)
+    func metadataDoesNotWaitBehindDDL(version: String) async throws {
+        let client = try await IT.client(version)
+        defer { Task { await client.close() } }
+        let locker = try await IT.connect(version)
+        defer { Task { await locker.close() } }
+        _ = try await locker.simpleQuery("BEGIN; LOCK TABLE shop.products IN ACCESS EXCLUSIVE MODE")
+        let started = ContinuousClock.now
+        let contents = try await client.schemaContents("shop")
+        let products = try #require(contents.relations.first { $0.name == "products" })
+        #expect(products.totalBytes == nil)
+        #expect(contents.relations.first { $0.name == "customers" }?.totalBytes != nil)
+        // Index sizes only lock the index, which LOCK TABLE does not: still available, without waiting.
+        #expect(try await client.unusedIndexes().contains { $0.index == "products_unused_idx" })
+        #expect(ContinuousClock.now - started < .seconds(5), "the schema listing waited for the lock")
+        #expect(try await client.records("SELECT current_setting('lock_timeout') AS t").first?.text("t") == "5s")
+        // Catalog functions such as pg_get_indexdef lock the table themselves: they give up after the lock timeout
+        // (55P03) instead of stalling for the whole statement budget.
+        for detail in [{ _ = try await client.indexes(of: products) }, { _ = try await client.statistics(of: products) }] as [@Sendable () async throws -> Void] {
+            let attempt = ContinuousClock.now
+            do {
+                try await detail()
+            } catch let error as PostgresError {
+                #expect(error.sqlState == "55P03", "\(error)")
+            }
+            #expect(ContinuousClock.now - attempt < .seconds(10), "a detail query waited for the lock")
+        }
+        _ = try await locker.simpleQuery("ROLLBACK")
+        let unlocked = try await client.schemaContents("shop")
+        #expect(unlocked.relations.first { $0.name == "products" }?.totalBytes != nil)
     }
 
     @Test(arguments: IT.versions)
