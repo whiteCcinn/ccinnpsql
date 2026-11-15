@@ -43,8 +43,18 @@ public enum ReadOnlySQLGuard {
         "pg_background_", "run_command_on_", "pgr_",
     ]
 
-    /// How deep string literals are searched for embedded calls (`ts_stat('SELECT f(''…'')')`).
+    /// How many levels of SQL inside string literals are followed (`f('SELECT g(''…'')')` is two).
     static let maxLiteralDepth = 4
+
+    /// Words that start a statement: literal content beginning with one is SQL and must pass the guard itself.
+    /// Includes PL/pgSQL statement starters, since function bodies can arrive as text too.
+    static let statementVerbs: Set<String> = [
+        "SELECT", "WITH", "VALUES", "TABLE", "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "CREATE", "ALTER", "DROP", "GRANT",
+        "REVOKE", "COPY", "CALL", "DO", "EXECUTE", "PREPARE", "DEALLOCATE", "LISTEN", "NOTIFY", "UNLISTEN", "SET", "RESET", "SHOW",
+        "BEGIN", "START", "COMMIT", "ROLLBACK", "END", "ABORT", "SAVEPOINT", "RELEASE", "LOCK", "VACUUM", "ANALYZE", "ANALYSE",
+        "CLUSTER", "REINDEX", "REFRESH", "DISCARD", "LOAD", "CHECKPOINT", "COMMENT", "SECURITY", "REASSIGN", "IMPORT", "EXPLAIN",
+        "DECLARE", "FETCH", "MOVE", "CLOSE", "PERFORM", "RETURN", "RAISE", "IF", "FOR", "LOOP", "WHILE", "FOREACH", "GET",
+    ]
 
     static func isForbiddenFunction(_ name: String) -> Bool {
         forbiddenFunctions.contains(name) || forbiddenPrefixes.contains { name.hasPrefix($0) }
@@ -52,6 +62,11 @@ public enum ReadOnlySQLGuard {
 
     /// `nil` when allowed; otherwise the reason it is rejected.
     public static func check(_ sql: String) -> String? {
+        check(sql, depth: 0)
+    }
+
+    /// `depth`: how many string literals deep `sql` was found (0 for the statement itself).
+    private static func check(_ sql: String, depth: Int) -> String? {
         let statements = SQLStatementSplitter.split(sql)
         guard let statement = statements.first else { return "The statement is empty." }
         guard statements.count == 1 else { return "Only one statement can be run at a time; send statements separately." }
@@ -60,7 +75,7 @@ public enum ReadOnlySQLGuard {
         guard first < analysis.words.count else { return "The statement is empty." }
         switch analysis.words[first] {
         case "SELECT", "WITH", "VALUES", "TABLE":
-            return checkQuery(analysis, from: first)
+            return checkQuery(analysis, from: first, depth: depth)
         case "SHOW":
             return nil
         case "EXPLAIN":
@@ -69,36 +84,47 @@ public enum ReadOnlySQLGuard {
             guard bodyFirst < analysis.words.count, ["SELECT", "WITH", "VALUES", "TABLE"].contains(analysis.words[bodyFirst]) else {
                 return "Only EXPLAIN of a SELECT query is allowed in read-only mode."
             }
-            return checkQuery(analysis, from: bodyFirst)
+            return checkQuery(analysis, from: bodyFirst, depth: depth)
         default:
             return rejection(analysis.words[first])
         }
     }
 
-    private static func checkQuery(_ analysis: StatementWords, from start: Int) -> String? {
+    private static func checkQuery(_ analysis: StatementWords, from start: Int, depth: Int) -> String? {
         guard SQLStatementKind.classify(analysis, from: start) == .query else {
             return "The statement writes data (a data-modifying WITH or SELECT … INTO); it is not allowed in read-only mode."
         }
-        var depth = 0
+        if let reason = forbiddenCall(in: analysis) { return reason }
+        var parentheses = 0
         for index in start..<analysis.tokens.count {
             let token = analysis.tokens[index]
-            if analysis.isPunctuation(index, "(") { depth += 1 }
-            if analysis.isPunctuation(index, ")") { depth = max(0, depth - 1) }
-            guard token.kind == .keyword || token.kind == .identifier || token.kind == .quotedIdentifier else { continue }
-            let raw = analysis.lexer.text(of: token)
-            if token.kind == .quotedIdentifier, raw.hasPrefix("U&") || raw.hasPrefix("u&") {
-                // Unicode escapes can spell any function name; not needed for read-only questions.
-                return "Unicode-escaped identifiers (U&\"…\") are not allowed in read-only mode."
-            }
+            if analysis.isPunctuation(index, "(") { parentheses += 1 }
+            if analysis.isPunctuation(index, ")") { parentheses = max(0, parentheses - 1) }
+            guard token.kind == .keyword || token.kind == .identifier else { continue }
             let word = analysis.words[index]
             if token.kind == .keyword, forbidden.contains(word) { return "`\(word)` is not allowed in a read-only query." }
             if token.kind == .keyword, word == "INTO" { return "SELECT … INTO creates a table; it is not allowed in read-only mode." }
-            if token.kind == .keyword, word == "FOR", depth == 0,
+            if token.kind == .keyword, word == "FOR", parentheses == 0,
                analysis.isWord(index + 1, "UPDATE") || analysis.isWord(index + 1, "SHARE") || analysis.isWord(index + 1, "NO")
                 || analysis.isWord(index + 1, "KEY") {
                 return "Row-locking clauses (FOR UPDATE / FOR SHARE) are not allowed in read-only mode."
             }
-            // Function calls: name ( … ), also schema-qualified.
+        }
+        return checkLiterals(in: analysis, depth: depth + 1)
+    }
+
+    /// Calls to forbidden functions (also schema-qualified or quoted), Unicode-escaped identifiers and `UESCAPE`,
+    /// which could spell any name.
+    private static func forbiddenCall(in analysis: StatementWords) -> String? {
+        for (index, token) in analysis.tokens.enumerated() {
+            guard token.kind == .keyword || token.kind == .identifier || token.kind == .quotedIdentifier else { continue }
+            let raw = analysis.lexer.text(of: token)
+            if token.kind == .quotedIdentifier, raw.hasPrefix("U&") || raw.hasPrefix("u&") {
+                return "Unicode-escaped identifiers (U&\"…\") are not allowed in read-only mode."
+            }
+            if token.kind != .quotedIdentifier, analysis.words[index] == "UESCAPE" {
+                return "UESCAPE is not allowed in read-only mode."
+            }
             if analysis.isPunctuation(index + 1, "(") {
                 let name = analysis.lexer.identifierValue(of: token)
                 if isForbiddenFunction(name) {
@@ -106,40 +132,196 @@ public enum ReadOnlySQLGuard {
                 }
             }
         }
-        return embeddedCallRejection(in: analysis, depth: 1)
+        return nil
     }
 
-    /// Text inside string literals can become SQL (functions that run a query given as text, user functions
-    /// with EXECUTE). Defense in depth: a literal that, read as SQL, calls a forbidden function is rejected.
-    private static func embeddedCallRejection(in analysis: StatementWords, depth: Int) -> String? {
-        guard depth <= maxLiteralDepth else { return "String literals are nested too deeply for a read-only query." }
-        for token in analysis.tokens where token.kind == .string {
-            let inner = StatementWords(literalBody(analysis.lexer.text(of: token)))
-            for index in inner.tokens.indices where inner.isPunctuation(index + 1, "(") {
-                let token = inner.tokens[index]
-                guard token.kind == .keyword || token.kind == .identifier || token.kind == .quotedIdentifier else { continue }
-                let name = inner.lexer.identifierValue(of: token)
-                if isForbiddenFunction(name) {
-                    return "A string literal contains a call to `\(name)()`, which is not allowed in read-only mode."
-                }
+    /// Many functions run SQL given as text (`ts_stat`, `query_to_xml`, `crosstab`, `pgr_*`, `dblink`, any function that
+    /// does `EXECUTE`); a denylist always misses one. So the content of every string literal (adjacent literals joined,
+    /// escapes decoded) is read as SQL again: content that starts with a statement verb must pass the whole guard, and
+    /// no content may call a forbidden function. Conservative by design: text that merely looks like a write is refused.
+    private static func checkLiterals(in analysis: StatementWords, depth: Int) -> String? {
+        var index = 0
+        while index < analysis.tokens.count {
+            guard analysis.tokens[index].kind == .string else {
+                index += 1
+                continue
             }
-            if let rejection = embeddedCallRejection(in: inner, depth: depth + 1) { return rejection }
+            var content = ""
+            var isText = false
+            while index < analysis.tokens.count, analysis.tokens[index].kind == .string {
+                if let part = literalContent(analysis.lexer.text(of: analysis.tokens[index])) {
+                    content += part
+                    isText = true
+                }
+                index += 1
+            }
+            if isText, let reason = checkEmbedded(content, depth: depth) { return reason }
         }
         return nil
     }
 
-    /// The characters between a literal's delimiters with doubled quotes undone (`E'…'`, `$tag$…$tag$`, `'…'`).
-    static func literalBody(_ literal: String) -> String {
-        var text = Substring(literal)
-        if text.first == "$", let close = text.dropFirst().firstIndex(of: "$") {
+    private static func checkEmbedded(_ text: String, depth: Int) -> String? {
+        let inner = StatementWords(text)
+        guard !inner.tokens.isEmpty else { return nil }
+        guard depth <= maxLiteralDepth else { return "SQL is nested too deeply in string literals for a read-only query." }
+        let first = inner.firstWordIndex()
+        if first < inner.tokens.count, inner.tokens[first].kind == .keyword || inner.tokens[first].kind == .identifier,
+           statementVerbs.contains(inner.words[first]) {
+            guard let reason = check(text, depth: depth) else { return nil }
+            return "A string literal contains SQL that is not allowed in read-only mode: \(reason)"
+        }
+        if let reason = forbiddenCall(in: inner) { return "A string literal contains SQL that is not allowed in read-only mode: \(reason)" }
+        return checkLiterals(in: inner, depth: depth + 1)
+    }
+
+    /// The text of a string literal as PostgreSQL reads it (with `standard_conforming_strings = on`, which the
+    /// read-only transaction pins): doubled quotes undone, `E''` and `U&''` escapes decoded, dollar quotes stripped.
+    /// `nil` for bit strings (`B''`, `X''`), which are not text.
+    static func literalContent(_ literal: String) -> String? {
+        let text = Substring(literal)
+        if text.first == "$" {
+            guard let close = text.dropFirst().firstIndex(of: "$") else { return String(text) }
             let tag = text[text.startIndex...close]
-            guard text.count >= tag.count * 2, text.hasSuffix(tag) else { return String(text.dropFirst(tag.count)) }
-            return String(text.dropFirst(tag.count).dropLast(tag.count))
+            let body = text.dropFirst(tag.count)
+            return String(body.hasSuffix(tag) && body.count >= tag.count ? body.dropLast(tag.count) : body)
         }
         guard let open = text.firstIndex(of: "'") else { return String(text) }
-        text = text[text.index(after: open)...]
-        if text.last == "'" { text = text.dropLast() }
-        return text.replacingOccurrences(of: "''", with: "'").replacingOccurrences(of: "\\'", with: "'")
+        let prefix = text[..<open].uppercased()
+        var body = text[text.index(after: open)...]
+        if body.last == "'" { body = body.dropLast() }
+        switch prefix {
+        case "B", "X": return nil
+        case "E": return decodeEscapeString(body)
+        case "U&": return decodeUnicodeString(body.replacingOccurrences(of: "''", with: "'"))
+        default: return body.replacingOccurrences(of: "''", with: "'")
+        }
+    }
+
+    /// `E'…'`: `\b \f \n \r \t`, octal `\o…`, hex `\xh…`, `\uXXXX`, `\UXXXXXXXX`, `''`, and `\c` for any other `c`.
+    static func decodeEscapeString(_ body: Substring) -> String {
+        let units = Array(body.utf8)
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(units.count)
+        var index = 0
+        func hexValue(_ count: Int, exact: Bool) -> (UInt32, Int)? {
+            var value: UInt32 = 0
+            var length = 0
+            while length < count, index + 1 + length < units.count, let digit = hexDigit(units[index + 1 + length]) {
+                value = value * 16 + UInt32(digit)
+                length += 1
+            }
+            return length == 0 || (exact && length != count) ? nil : (value, length)
+        }
+        while index < units.count {
+            let unit = units[index]
+            if unit == 0x27, index + 1 < units.count, units[index + 1] == 0x27 {
+                bytes.append(0x27)
+                index += 2
+                continue
+            }
+            guard unit == 0x5C, index + 1 < units.count else {
+                bytes.append(unit)
+                index += 1
+                continue
+            }
+            let next = units[index + 1]
+            switch next {
+            case UInt8(ascii: "b"): bytes.append(0x08); index += 2
+            case UInt8(ascii: "f"): bytes.append(0x0C); index += 2
+            case UInt8(ascii: "n"): bytes.append(0x0A); index += 2
+            case UInt8(ascii: "r"): bytes.append(0x0D); index += 2
+            case UInt8(ascii: "t"): bytes.append(0x09); index += 2
+            case UInt8(ascii: "0")...UInt8(ascii: "7"):
+                var value: UInt32 = 0
+                var length = 0
+                while length < 3, index + 1 + length < units.count, (0x30...0x37).contains(units[index + 1 + length]) {
+                    value = value * 8 + UInt32(units[index + 1 + length] - 0x30)
+                    length += 1
+                }
+                bytes.append(UInt8(truncatingIfNeeded: value))
+                index += 1 + length
+            case UInt8(ascii: "x"):
+                index += 1 // now at `x`
+                if let (value, length) = hexValue(2, exact: false) {
+                    bytes.append(UInt8(truncatingIfNeeded: value))
+                    index += 1 + length
+                } else {
+                    bytes.append(UInt8(ascii: "x"))
+                    index += 1
+                }
+            case UInt8(ascii: "u"), UInt8(ascii: "U"):
+                let count = next == UInt8(ascii: "u") ? 4 : 8
+                index += 1 // now at `u`
+                if let (value, length) = hexValue(count, exact: true), let scalar = Unicode.Scalar(value) {
+                    bytes.append(contentsOf: Array(String(Character(scalar)).utf8))
+                    index += 1 + length
+                } else {
+                    bytes.append(next)
+                    index += 1
+                }
+            default:
+                bytes.append(next)
+                index += 2
+            }
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// `U&'…'` with the default escape `\`: `\XXXX`, `\+XXXXXX` (surrogate pairs joined) and `\\`.
+    static func decodeUnicodeString(_ body: String) -> String {
+        let characters = Array(body.unicodeScalars)
+        var result = String.UnicodeScalarView()
+        var index = 0
+        var pendingHigh: UInt32?
+        func hex(_ start: Int, _ count: Int) -> UInt32? {
+            guard start + count <= characters.count else { return nil }
+            var value: UInt32 = 0
+            for scalar in characters[start..<(start + count)] {
+                guard scalar.isASCII, let digit = hexDigit(UInt8(scalar.value)) else { return nil }
+                value = value * 16 + UInt32(digit)
+            }
+            return value
+        }
+        while index < characters.count {
+            let scalar = characters[index]
+            guard scalar == "\\" else {
+                result.append(scalar)
+                index += 1
+                continue
+            }
+            if index + 1 < characters.count, characters[index + 1] == "\\" {
+                result.append("\\")
+                index += 2
+                continue
+            }
+            let plus = index + 1 < characters.count && characters[index + 1] == "+"
+            guard let value = plus ? hex(index + 2, 6) : hex(index + 1, 4) else {
+                result.append(scalar)
+                index += 1
+                continue
+            }
+            index += plus ? 8 : 5
+            if (0xD800...0xDBFF).contains(value) {
+                pendingHigh = value
+                continue
+            }
+            var code = value
+            if (0xDC00...0xDFFF).contains(value), let high = pendingHigh {
+                code = 0x10000 + ((high - 0xD800) << 10) + (value - 0xDC00)
+            }
+            pendingHigh = nil
+            if let decoded = Unicode.Scalar(code) { result.append(decoded) }
+        }
+        return String(result)
+    }
+
+    private static func hexDigit(_ unit: UInt8) -> UInt8? {
+        switch unit {
+        case 0x30...0x39: unit - 0x30
+        case 0x41...0x46: unit - 0x41 + 10
+        case 0x61...0x66: unit - 0x61 + 10
+        default: nil
+        }
     }
 
     private static func rejection(_ keyword: String) -> String {

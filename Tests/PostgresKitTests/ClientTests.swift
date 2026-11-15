@@ -65,16 +65,16 @@ struct ClientTests {
                 if let reply = FakeFacts.reply(query, pid: pid) { return reply }
                 if query == "SELECT e" { return .bytes(Wire.rowDescription(["e"], type: 70_000) + Wire.dataRow(["happy"]) + Wire.complete("SELECT 1")) }
                 if query.contains("FROM pg_type") {
-                    // Connection 1 serves database "other", connection 2 database "third": same OID, different types.
-                    return .bytes(Wire.rows(["oid", "typname"], [["70000", index == 1 ? "mood" : "colour"]]))
+                    // Connection 0 serves the default database, 1 "other", 2 "third": same OID, different types.
+                    return .bytes(Wire.rows(["oid", "typname"], [["70000", ["status", "mood", "colour"][min(index, 2)]]]))
                 }
                 return .bytes(Wire.complete("SELECT 0"))
             }
         }
-        // poolSize 2 → pools for other databases hold a single connection.
-        let client = try await PostgresClient.connect(fakeConfiguration(), poolSize: 2, transportFactory: network.factory)
+        // Pool size 1: every database's pool holds a single connection.
+        let client = try await PostgresClient.connect(fakeConfiguration(), poolSize: 1, transportFactory: network.factory)
         defer { Task { await client.close() } }
-        func resolve(_ database: String) async throws -> String? {
+        func resolve(_ database: String?) async throws -> String? {
             try await Deadline.run(seconds: 5, timeoutError: { PostgresError(.timeout, "type-name lookup waited for a second connection") }) {
                 try await client.withConnection(database: database) { connection in
                     let result = try await connection.extendedQuery("SELECT e")
@@ -82,6 +82,7 @@ struct ClientTests {
                 }
             }
         }
+        #expect(try await resolve(nil) == "status")
         #expect(try await resolve("other") == "mood")
         #expect(try await resolve("third") == "colour")
         // Cached: a second lookup in "other" sends no pg_type query and keeps that database's name.

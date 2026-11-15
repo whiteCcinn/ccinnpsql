@@ -188,11 +188,14 @@ struct ReadOnlyGuardTests {
         "SHOW search_path",
         "EXPLAIN SELECT 1",
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM t",
-        "SELECT 'DELETE FROM t' AS text, $$DROP TABLE t$$ AS body /* UPDATE */ -- INSERT",
+        "SELECT 'hello' AS text, $$plain words$$ AS body /* UPDATE */ -- INSERT",
+        "SELECT 'Select a plan' AS label, 'Show more' AS more",
+        "SELECT $q$SELECT lower('x') FROM t$q$ AS sql",
+        "SELECT E'tab\\there' AS escaped, U&'d\\0061ta' AS unicode, B'1010' AS bits, X'1F' AS hex",
         "SELECT \"update\" FROM t",
         "SELECT pg_sleep(1)",
         "SELECT count(*) FROM pg_stat_activity",
-        "SELECT to_tsvector('english', 'the delete key') @@ to_tsquery('delete')",
+        "SELECT to_tsvector('english', 'the delete key') @@ to_tsquery('removal')",
         "SELECT 'note: call support(now)' AS text",
         "SELECT $q$SELECT lower('x')$q$ AS sql",
     ])
@@ -273,9 +276,61 @@ struct ReadOnlyGuardTests {
         "SELECT my_exec(E'SELECT pg_notify(\\'c\\', \\'x\\')')",
         "SELECT my_exec('SELECT f(''SELECT \"pg_read_file\"(/etc/passwd)'')')",
         "SELECT pg_reload_conf/**/()",
+        // Lead review: inner SQL is checked recursively by the whole guard, whatever function receives it.
+        "SELECT 'DELETE FROM t' AS text",
+        "SELECT my_exec($$DELETE FROM t$$)",
+        "SELECT my_exec($body$ INSERT INTO t VALUES (1) $body$)",
+        "SELECT my_exec('SELECT my_exec(''DELETE FROM t'')')",
+        "SELECT my_exec('SELECT my_exec($x$UPDATE t SET a = 1$x$)')",
+        "SELECT my_exec('SELECT 1; DELETE FROM t')",
+        "SELECT my_exec('BEGIN PERFORM 1; END')",
+        "SELECT my_exec('SELECT * FROM t FOR UPDATE')",
+        "SELECT my_exec(E'\\x44ELETE FROM t')",
+        "SELECT my_exec(E'\\104ELETE FROM t')",
+        "SELECT my_exec(E'SELECT pg\\u005fterminate_backend(1)')",
+        "SELECT my_exec(U&'\\0044ELETE FROM t')",
+        "SELECT my_exec(U&'!0044ELETE FROM t' UESCAPE '!')",
+        "SELECT my_exec('DEL'\n'ETE FROM t')",
+        "SELECT my_exec('x := pg_terminate_backend(1)')",
+        // Conservative by design: a literal that is a write verb is refused even as plain data.
+        "SELECT to_tsquery('delete')",
     ])
     func rejects(sql: String) {
         #expect(ReadOnlySQLGuard.check(sql) != nil, "\(sql)")
+    }
+}
+
+@Suite("Read-only guard literal decoding")
+struct LiteralDecodingTests {
+    /// `SELECT f('…')` around `sql`, quoting it like PostgreSQL.
+    private func nested(_ sql: String, levels: Int) -> String {
+        (0..<levels).reduce(sql) { inner, _ in "SELECT f('" + inner.replacingOccurrences(of: "'", with: "''") + "')" }
+    }
+
+    @Test func innerSQLIsCheckedAtEveryLevelUpToTheLimit() {
+        #expect(ReadOnlySQLGuard.check(nested("SELECT 1", levels: 3)) == nil)
+        #expect(ReadOnlySQLGuard.check(nested("DELETE FROM t", levels: 2)) != nil)
+        #expect(ReadOnlySQLGuard.check(nested("DELETE FROM t", levels: 4)) != nil)
+        #expect(ReadOnlySQLGuard.check(nested("SELECT pg_terminate_backend(1)", levels: 3)) != nil)
+        // Deeper than the limit is refused even when harmless.
+        #expect(ReadOnlySQLGuard.check(nested("SELECT 1", levels: ReadOnlySQLGuard.maxLiteralDepth + 1)) != nil)
+    }
+
+    @Test func decodesLiteralsAsPostgreSQLReadsThem() {
+        #expect(ReadOnlySQLGuard.literalContent("'it''s'") == "it's")
+        #expect(ReadOnlySQLGuard.literalContent("'a\\b'") == "a\\b") // standard_conforming_strings = on
+        #expect(ReadOnlySQLGuard.literalContent("E'it\\'s\\n\\x41\\101\\u00e9\\U0001F600\\q'") == "it's\nAAé😀q")
+        #expect(ReadOnlySQLGuard.literalContent("e'\\\\'") == "\\")
+        #expect(ReadOnlySQLGuard.literalContent("U&'d\\0061t\\+000061 \\\\ \\D83D\\DE00'") == "data \\ 😀")
+        #expect(ReadOnlySQLGuard.literalContent("$tag$ x $ y $tag$") == " x $ y ")
+        #expect(ReadOnlySQLGuard.literalContent("$$unterminated") == "unterminated")
+        #expect(ReadOnlySQLGuard.literalContent("N'national'") == "national")
+        #expect(ReadOnlySQLGuard.literalContent("B'1010'") == nil)
+        #expect(ReadOnlySQLGuard.literalContent("X'1F'") == nil)
+        // Malformed escapes never trap.
+        for literal in ["E'\\", "E'\\x'", "E'\\u12'", "E'\\U'", "U&'\\'", "U&'\\+12'", "U&'\\DC00'", "'", "E'", "$"] {
+            _ = ReadOnlySQLGuard.literalContent(literal)
+        }
     }
 }
 

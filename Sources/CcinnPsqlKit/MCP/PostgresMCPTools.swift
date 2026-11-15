@@ -500,14 +500,15 @@ public struct PostgresMCPTools: MCPToolProvider {
         let database = args.string("database")
         let result: QueryResult = try await client.withConnection(database: database) { connection in
             try await Deadline.run(seconds: timeout, timeoutError: Self.timeoutError(timeout)) {
-                let keepsSession = client.serverInfo.keepsSessionState
-                if keepsSession { _ = try await connection.simpleQuery("SET statement_timeout = \(Int(timeout * 1000))") }
+                if client.serverInfo.keepsSessionState {
+                    _ = try await connection.simpleQuery("SET statement_timeout = \(Int(timeout * 1000))")
+                }
                 do {
                     let result = try await connection.extendedQuery(statement, limits: RowLimits(maxRows: Self.maxRowLimit, maxBytes: 64 * 1024 * 1024))
-                    if keepsSession { _ = try? await connection.simpleQuery("RESET statement_timeout") }
+                    await Self.endCall(on: connection, client: client)
                     return result
                 } catch {
-                    if keepsSession { _ = try? await connection.simpleQuery("RESET statement_timeout") }
+                    await Self.endCall(on: connection, client: client)
                     throw error
                 }
             }
@@ -537,14 +538,16 @@ public struct PostgresMCPTools: MCPToolProvider {
         }
         return try await client.withConnection(database: database) { connection in
             try await Deadline.run(seconds: timeout, timeoutError: timeoutError(timeout)) {
-                _ = try await connection.simpleQuery(client.routingPrefix + readOnlyPreamble(timeout: timeout), limits: .metadata)
                 do {
+                    _ = try await connection.simpleQuery(client.routingPrefix + readOnlyPreamble(timeout: timeout), limits: .metadata)
                     let result = try await connection.extendedQuery(sql, limits: limits)
-                    _ = try? await connection.simpleQuery(client.routingPrefix + readOnlyEpilogue, limits: .metadata)
-                    // Same connection: a second checkout could wait forever on a one-connection pool.
-                    return try await client.resolvingTypeNames(result, database: database, using: connection)
+                    // Same connection, still inside the read-only transaction: a second checkout could wait forever on
+                    // a one-connection pool.
+                    let named = try await client.resolvingTypeNames(result, database: database, using: connection)
+                    await endCall(on: connection, client: client)
+                    return named
                 } catch {
-                    _ = try? await connection.simpleQuery(client.routingPrefix + readOnlyEpilogue, limits: .metadata)
+                    await endCall(on: connection, client: client)
                     throw error
                 }
             }
@@ -557,9 +560,28 @@ public struct PostgresMCPTools: MCPToolProvider {
         "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout = \(Int(timeout * 1000)); SET LOCAL standard_conforming_strings = on"
     }
 
-    /// Ends the read-only transaction and drops session-level advisory locks, the one piece of state a ROLLBACK
-    /// keeps, so a pooled connection never carries a lock taken by a function the guard cannot see into.
-    static let readOnlyEpilogue = "ROLLBACK; SELECT pg_advisory_unlock_all()"
+    /// Statements that end an MCP call before its pooled connection is reused: the transaction is rolled back and
+    /// the session reset, so nothing a call did (a session advisory lock, a prepared statement, LISTEN, a setting —
+    /// also through SQL built at run time that no guard can see) outlives it. `DISCARD ALL` cannot run in a
+    /// multi-statement message, hence its own message. Behind a transaction pooler the server connection is shared:
+    /// the reset avoids `DISCARD ALL`/`DEALLOCATE ALL`, which would drop the pooler's own prepared statements.
+    static func sessionReset(keepsSessionState: Bool) -> [String] {
+        keepsSessionState
+            ? ["ROLLBACK", "DISCARD ALL"]
+            : ["ROLLBACK; SELECT pg_advisory_unlock_all(); UNLISTEN *; RESET ALL"]
+    }
+
+    /// Runs `sessionReset`; a connection whose reset fails or that is not idle afterwards is closed, so the pool
+    /// drops it instead of handing out a session in an unknown state.
+    static func endCall(on connection: PostgresConnection, client: PostgresClient) async {
+        do {
+            for statement in sessionReset(keepsSessionState: client.serverInfo.keepsSessionState) {
+                _ = try await connection.simpleQuery(client.routingPrefix + statement, limits: .metadata)
+            }
+            if await connection.transactionStatus == .idle { return }
+        } catch {}
+        await connection.close()
+    }
 
     // MARK: Encoding
 

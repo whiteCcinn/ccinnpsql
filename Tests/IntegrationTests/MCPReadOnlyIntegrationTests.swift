@@ -130,12 +130,14 @@ struct MCPReadOnlyIntegrationTests {
             \(scram)CREATE ROLE ccinnpsql_scs_off LOGIN PASSWORD 'scsoff';
             ALTER ROLE ccinnpsql_scs_off SET standard_conforming_strings = off;
             CREATE OR REPLACE FUNCTION ccinnpsql_mcp_locker() RETURNS int LANGUAGE plpgsql AS $f$ BEGIN PERFORM pg_advisory_lock(424242); RETURN 1; END $f$;
+            CREATE OR REPLACE FUNCTION ccinnpsql_mcp_exec(sql text) RETURNS int LANGUAGE plpgsql AS $f$ BEGIN EXECUTE sql; RETURN 1; END $f$;
             """)
         let victim = try await IT.connect(version)
         let victimPID = try #require(victim.backendKey?.processID)
 
-        // The MCP server's pool size: pools for other databases get a single connection.
-        let mcpClient = try await PostgresClient.connect(IT.configuration(version), poolSize: 3)
+        // A pool of size 1: every call reuses the same connection (so leftover state would be visible), and the
+        // type-name lookup must not wait for a second connection.
+        let mcpClient = try await PostgresClient.connect(IT.configuration(version), poolSize: 1)
         let profile = ConnectionProfile(name: "IT \(version)", host: "127.0.0.1", port: IT.port(version), username: "ccinn", database: "ccinn",
                                         mcpAccess: .readOnly)
         let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
@@ -151,6 +153,41 @@ struct MCPReadOnlyIntegrationTests {
         #expect(!locker.isError, "\(locker.payload)")
         let held = try await admin.records("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid IN (424242, 424243, 777)")
         #expect(held.first?.int("n") == 0, "an advisory lock survived the read-only run")
+
+        // Lead review: SQL handed to an EXECUTE function as a literal is checked recursively and refused...
+        for sql in ["SELECT ccinnpsql_mcp_exec('SELECT pg_advisory_lock(424244)')", "SELECT ccinnpsql_mcp_exec($x$DELETE FROM pg_class$x$)",
+                    "SELECT ccinnpsql_mcp_exec('SELECT ccinnpsql_mcp_exec(''SELECT pg_advisory_lock(424244)'')')"] {
+            let refused = await tools.call(name: "run_query", arguments: ["sql": .string(sql)])
+            #expect(refused.isError, "accepted: \(sql)")
+        }
+        // ...and SQL built at run time, which no lexer can see, leaves nothing behind: the session is reset.
+        let builtAtRunTime = await tools.call(name: "run_query", arguments: ["sql": """
+            SELECT ccinnpsql_mcp_exec(concat('SELECT pg_advisory_lo', 'ck(424244)')) AS locked,
+                   ccinnpsql_mcp_exec(concat('PREP', 'ARE ccinnpsql_mcp_prepared AS SELECT 1')) AS prepared,
+                   ccinnpsql_mcp_exec(concat('LIS', 'TEN ccinnpsql_mcp_channel')) AS listening
+            """])
+        #expect(!builtAtRunTime.isError, "\(builtAtRunTime.payload)")
+        #expect(try await admin.records("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = 424244").first?.int("n") == 0,
+                "the smuggled advisory lock survived the call")
+        let leftovers = await tools.call(name: "run_query", arguments: [
+            "sql": "SELECT (SELECT count(*) FROM pg_prepared_statements) AS prepared, (SELECT count(*) FROM pg_listening_channels()) AS channels",
+        ])
+        #expect(leftovers.payload["rows"]?[0]?[0] == .int(0), "a prepared statement survived: \(leftovers.payload)")
+        #expect(leftovers.payload["rows"]?[0]?[1] == .int(0), "a LISTEN survived: \(leftovers.payload)")
+
+        // execute_statement (read & write access) resets the session too.
+        let writer = ConnectionProfile(name: "IT rw \(version)", host: "127.0.0.1", port: IT.port(version), username: "ccinn", database: "ccinn",
+                                       mcpAccess: .readWrite)
+        let writeTools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [writer], defaultProfile: nil, forceReadOnly: false),
+                                          registry: MCPClientRegistry { _ in mcpClient }, audit: nil)
+        let set = await writeTools.call(name: "execute_statement", arguments: ["sql": "SET search_path TO shop"])
+        #expect(!set.isError, "\(set.payload)")
+        let path = await writeTools.call(name: "run_query", arguments: ["sql": "SELECT current_setting('search_path') AS path"])
+        #expect(path.payload["rows"]?[0]?[0] == "\"$user\", public", "\(path.payload)")
+
+        let typed = await tools.call(name: "run_query", arguments: ["sql": "SELECT indkey FROM pg_index LIMIT 1", "timeout_seconds": 20])
+        #expect(!typed.isError, "\(typed.payload)")
+        #expect(typed.payload["columns"]?[0]?["type"] == "int2vector")
 
         let other = await tools.call(name: "run_query", arguments: [
             "sql": "SELECT indkey, indclass FROM pg_index LIMIT 1", "database": "postgres", "timeout_seconds": 20,
@@ -179,6 +216,6 @@ struct MCPReadOnlyIntegrationTests {
         await offClient.close()
         await mcpClient.close()
         await victim.close()
-        _ = try await admin.simpleQuery("DROP FUNCTION ccinnpsql_mcp_locker(); DROP ROLE ccinnpsql_scs_off")
+        _ = try await admin.simpleQuery("DROP FUNCTION ccinnpsql_mcp_locker(); DROP FUNCTION ccinnpsql_mcp_exec(text); DROP ROLE ccinnpsql_scs_off")
     }
 }

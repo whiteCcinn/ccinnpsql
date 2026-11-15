@@ -195,8 +195,12 @@ struct MCPProfileTests {
         #expect(preamble.hasPrefix("BEGIN TRANSACTION READ ONLY;"))
         #expect(preamble.contains("SET LOCAL statement_timeout = 30000"))
         #expect(preamble.contains("SET LOCAL standard_conforming_strings = on"))
-        #expect(PostgresMCPTools.readOnlyEpilogue.hasPrefix("ROLLBACK;"))
-        #expect(PostgresMCPTools.readOnlyEpilogue.contains("pg_advisory_unlock_all()"))
+        // Lead review, layer 2: every call ends with a session reset before the connection is reused.
+        #expect(PostgresMCPTools.sessionReset(keepsSessionState: true) == ["ROLLBACK", "DISCARD ALL"])
+        let pooled = PostgresMCPTools.sessionReset(keepsSessionState: false).joined(separator: "; ")
+        #expect(pooled.hasPrefix("ROLLBACK;"))
+        for part in ["pg_advisory_unlock_all()", "UNLISTEN *", "RESET ALL"] { #expect(pooled.contains(part)) }
+        #expect(!pooled.contains("DISCARD ALL") && !pooled.contains("DEALLOCATE"))
     }
 
     @Test func guardRejectsBeforeConnecting() async throws {
