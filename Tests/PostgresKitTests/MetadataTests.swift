@@ -90,6 +90,12 @@ struct SessionSettingsTests {
         #expect(replay([("BEGIN; SET a.x = 1", nil, false, .inTransaction), ("CALL p()", nil, false, .idle), ("COMMIT", nil, false, .idle)]).isEmpty)
         #expect(replay([("BEGIN; SET a.x = 1; COMMIT AND CHAIN; SET a.y = 2; ROLLBACK", nil, false, .idle)]) == ["SET a.x = 1"])
         #expect(replay([("SET a.x = 1; SET a.y = 2", nil, false, .idle)]) == ["SET a.x = 1", "SET a.y = 2"])
+        // After a reconnect the old transaction is gone: a later autocommit SET is kept.
+        var reconnected = SessionSettingsLog()
+        reconnected.recordBatch(["BEGIN", "SET a.x = 1"], completed: 2, failed: false, finalStatus: .inTransaction)
+        reconnected.align(with: .idle) // fresh connection
+        reconnected.recordBatch(["SET a.y = 2"], completed: 1, failed: false, finalStatus: .idle)
+        #expect(reconnected.replayStatements == ["SET a.y = 2"])
         // Escape strings do not end statements early.
         #expect(SimpleStatementSplitter.split("SELECT E'it\\'s; fine'; SET a.x = 1; -- done") == ["SELECT E'it\\'s; fine'", "SET a.x = 1"])
     }

@@ -206,6 +206,12 @@ public struct SessionSettingsLog: Sendable, Equatable {
         }
     }
 
+    /// Aligns with the connection's status before a new message: a transaction that ended unseen (a reconnect,
+    /// a server-side termination) keeps nothing, and later statements are not mistaken for part of it.
+    public mutating func align(with status: TransactionStatus) {
+        if status == .idle, inTransaction { endTransaction(chain: false) }
+    }
+
     /// One statement that ran on its own. `inTransaction` is the status after it ran.
     public mutating func record(_ sql: String, inTransaction: Bool) {
         recordBatch([sql], completed: 1, failed: false, finalStatus: inTransaction ? .inTransaction : .idle)

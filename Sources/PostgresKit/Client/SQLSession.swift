@@ -43,6 +43,7 @@ public actor SQLSession {
         let connection = try await ensureConnection()
         runGeneration &+= 1
         lostTransaction = false
+        settings.align(with: await connection.transactionStatus)
         do {
             let result: QueryResult
             switch mode {
