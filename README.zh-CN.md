@@ -164,8 +164,8 @@ CcinnPsql 内置 **Model Context Protocol** 服务。**Claude Code**、**Codex**
 **安全**
 
 - 密码保存在钥匙串中，从不展示给 AI；只有你启用的连接对 AI 可见。
-- 只读**双重保障**。第一层，应用自带的 PostgreSQL 词法分析器只接受单条只读语句：`SELECT`、`WITH … SELECT`、`VALUES`、`TABLE`、`SHOW`，或对它们的 `EXPLAIN`。它会拒绝修改数据的 CTE、`SELECT … INTO`、`COPY`、`DO`、`CALL`、事务控制、`SET`、行锁、有副作用的函数（`pg_terminate_backend`、`set_config`、`pg_notify`、advisory 锁、大对象、服务器文件访问、复制槽、`dblink` 等），以及把文本当作 SQL 执行的函数（`ts_stat`、`query_to_xml`、`crosstab` 等）。第二层，语句会通过扩展查询协议在 `BEGIN TRANSACTION READ ONLY … ROLLBACK` 中执行，并设置 `statement_timeout`；即使词法检查有遗漏，PostgreSQL 自身也会拒绝写入。
-- 数据库里自定义的函数仍可能做 READ ONLY 事务允许的事情，因此请为 AI 连接使用最小权限的角色（例如 `pg_read_all_data` + `pg_monitor`），不要用超级用户。
+- 只读**双重保障**。第一层，应用自带的 PostgreSQL 词法分析器只接受单条只读语句：`SELECT`、`WITH … SELECT`、`VALUES`、`TABLE`、`SHOW`，或对它们的 `EXPLAIN`。它会拒绝修改数据的 CTE、`SELECT … INTO`、`COPY`、`DO`、`CALL`、事务控制、`SET`、行锁、有副作用的函数（`pg_terminate_backend`、`set_config`、`pg_notify`、advisory 锁、大对象、服务器文件访问、复制槽、`dblink` 等），以及把文本当作 SQL 执行的函数（`ts_stat`、`query_to_xml`、`crosstab`、`pgr_*` 等）。字符串字面量里的 SQL 无论传给哪个函数，都会被递归地再检查一遍。第二层，语句会通过扩展查询协议在 `BEGIN TRANSACTION READ ONLY … ROLLBACK` 中执行，并设置 `statement_timeout`；即使词法检查有遗漏，PostgreSQL 自身也会拒绝写入。每次调用结束、连接归还连接池之前，会话都会被重置（`DISCARD ALL`）。
+- 只读的含义是**不修改数据和表结构**。数据库中已有的函数仍可能做只读事务允许的事情（例如向其他会话发送信号），任何 SQL 检查都看不到函数内部。若要真正隔离，请为 AI 连接使用专门的低权限角色——PostgreSQL 14+：`CREATE ROLE ai_reader LOGIN PASSWORD '…'; GRANT pg_read_all_data, pg_monitor TO ai_reader;`（设置 → MCP 面板中也有提示）。
 - 结果最多 1,000 行（默认 200 行）、约 256 KB；语句默认 30 秒超时（最长 120 秒）。
 - 在 AI 客户端取消请求时，会向 PostgreSQL 发送 CancelRequest。
 - `--read-only` 把所有连接限制为只读；`--profile <名称>` 指定默认连接。

@@ -8,6 +8,12 @@ struct MCPSettingsView: View {
 
     private var command: String { MCPCommand.executablePath }
 
+    /// A least-privilege role for AI connections (`pg_read_all_data` exists on PostgreSQL 14+, `pg_monitor` on 10+).
+    static let readerRoleSQL = """
+        CREATE ROLE ai_reader LOGIN PASSWORD 'change-me';
+        GRANT pg_read_all_data, pg_monitor TO ai_reader;
+        """
+
     private var snippets: [(title: String, text: String)] {
         let quoted = command.replacingOccurrences(of: "\"", with: "\\\"")
         return [
@@ -23,6 +29,32 @@ struct MCPSettingsView: View {
                 Text("CcinnPsql includes a Model Context Protocol server, so AI assistants such as Claude Code, Codex and Claude Desktop can explore your databases and run queries through your saved connections. Passwords stay in your Keychain and are never shown to the AI.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+            Section {
+                Label {
+                    Text("Read-only means no data or schema changes. Functions already defined in your database can still do what a read-only transaction allows (such as signalling other sessions), and no SQL check sees inside them. For real isolation, connect AI with a dedicated low-privilege role, not a superuser:")
+                        .font(.callout)
+                } icon: {
+                    Image(systemName: "lock.shield").foregroundStyle(Theme.accent)
+                }
+                HStack(alignment: .top) {
+                    Text(Self.readerRoleSQL)
+                        .font(Theme.monospacedSmall)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button(copied == "role" ? "Copied" : "Copy") {
+                        Pasteboard.copy(Self.readerRoleSQL)
+                        copied = "role"
+                    }
+                    .controlSize(.small)
+                }
+                .padding(8)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                Text("pg_read_all_data needs PostgreSQL 14 or later; on older servers grant SELECT on the schemas the AI may read, plus pg_monitor (10+) for activity and statistics.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Recommended: a dedicated role")
             }
             Section("Connections available to AI") {
                 if store.profiles.isEmpty {
