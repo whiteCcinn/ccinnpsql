@@ -45,9 +45,10 @@ CCINNPSQL_PASSWORD=ccinn dist/CcinnPsql.app/Contents/MacOS/CcinnPsql \
 
 Passwords never go on the command line; set `CCINNPSQL_PASSWORD` in the environment. Other launch arguments:
 `--sql "…" --auto-run [--view chart|plan]`, `--sql "…" --explain [--analyze]`, `--operations activity|locks|replication|…`,
-`--notifications`, `--profile <saved name>`, `--appearance light|dark` and
-`--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot` (renders the window off-screen without stealing focus
-or needing screen-recording permission). `CCINNPSQL_PROFILE_DIR` points the app and the MCP server at another profile folder.
+`--notifications`, `--profile <saved name>`, `--duplicate-window` (opens a second window with the same connection once
+connected), `--appearance light|dark` and
+`--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot [--snapshot-window <title>]` (renders the frontmost
+window, or the one with that title, off-screen without stealing focus or needing screen-recording permission). `CCINNPSQL_PROFILE_DIR` points the app and the MCP server at another profile folder.
 
 ## Project layout
 

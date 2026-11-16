@@ -63,6 +63,7 @@ CcinnPsql answers those in one click. It is a native SwiftUI/AppKit app with its
   - **LISTEN / NOTIFY** panel: listen to channels on a dedicated connection and see notifications as they arrive.
 - **Charts from any result**: line over time, bars by category, grouped bars, scatter and pie, with series and aggregation; large results are reduced to at most 2,000 points.
 - **Connections done right**
+  - **Multiple windows**, each with its own connection: File ▸ New Window (⌘N), **New Window with This Connection** (⇧⌘N, also the toolbar's New Window button), or **Open in New Window** on a saved connection. Closing a window disconnects only that window.
   - `sslmode` disable / prefer / require / verify-ca / verify-full with your own CA file, TLS on the same socket after PostgreSQL's SSLRequest, and PostgreSQL 17 **direct TLS**. The header always shows whether the session is encrypted.
   - SCRAM-SHA-256 (the server's signature is verified), MD5, trust, and opt-in clear-text passwords.
   - SSH tunnels through the system `ssh`, secrets in the Keychain.
@@ -130,6 +131,8 @@ Useful shortcuts:
 | **⌃Space** | Show completions |
 | **⌘/** | Comment or uncomment lines |
 | **⌘T** | New query |
+| **⌘N** | New window (another server, or the same one) |
+| **⇧⌘N** | New window with this connection |
 | **⌥⌘1** | Activity |
 | **⇧⌘R** | Refresh schemas |
 | **⇧⌘D** | Disconnect |

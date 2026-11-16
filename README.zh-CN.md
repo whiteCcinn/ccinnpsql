@@ -63,6 +63,7 @@ CcinnPsql 一键回答这些问题。它是原生 SwiftUI/AppKit 应用，自带
   - **LISTEN / NOTIFY** 面板：在独立连接上监听频道，通知到达即显示。
 - **任意结果一键成图**：时间折线、分类柱状、分组柱状、散点与饼图，支持系列与聚合；大结果集最多压缩到 2,000 个点。
 - **连接做到位**
+  - **多窗口**，每个窗口使用各自独立的连接：File ▸ New Window（⌘N）打开新窗口；**New Window with This Connection**（⇧⌘N，也可点工具栏的 New Window 按钮）用当前连接再开一个窗口；也可以在已保存连接的右键菜单中选择 **Open in New Window**。关闭某个窗口只会断开该窗口的连接。
   - `sslmode` disable / prefer / require / verify-ca / verify-full，可指定自己的 CA 文件；在 PostgreSQL 的 SSLRequest 之后于同一连接上升级 TLS，并支持 PostgreSQL 17 的**直接 TLS**。顶栏始终显示会话是否加密。
   - SCRAM-SHA-256（校验服务端签名）、MD5、trust，以及需手动开启的明文密码。
   - 通过系统 `ssh` 建立 SSH 隧道，密码保存在钥匙串中。
@@ -130,6 +131,8 @@ CcinnPsql 每天也会在后台自动检查一次，可以在 **设置 → 通�
 | **⌃Space** | 显示补全 |
 | **⌘/** | 注释或取消注释 |
 | **⌘T** | 新建查询 |
+| **⌘N** | 新建窗口（连接其他服务器，或同一台服务器） |
+| **⇧⌘N** | 用当前连接新建窗口 |
 | **⌥⌘1** | 会话活动 |
 | **⇧⌘R** | 刷新 schema |
 | **⇧⌘D** | 断开连接 |
