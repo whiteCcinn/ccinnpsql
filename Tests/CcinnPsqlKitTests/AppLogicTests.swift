@@ -191,6 +191,9 @@ struct ExplainTests {
         #expect(throws: ExplainPlan.ParseError.self) { try ExplainPlan.parse("QUERY PLAN\nSeq Scan") }
         #expect(throws: ExplainPlan.ParseError.self) { try ExplainPlan.parse(#"[{"NoPlan": 1}]"#) }
         #expect(ExplainPlan.statement(for: "SELECT 1;", analyze: true, buffers: true) == "EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS) SELECT 1")
+        // The prefix maps server error positions back to the statement in the editor.
+        #expect(ExplainPlan.statementPrefix(analyze: false, buffers: false) == "EXPLAIN (FORMAT JSON) ")
+        #expect(ExplainPlan.statement(for: "SELECT 1", analyze: false, buffers: false) == ExplainPlan.statementPrefix(analyze: false, buffers: false) + "SELECT 1")
     }
 
     @Test func fuzzedPlansNeverTrap() {

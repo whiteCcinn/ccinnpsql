@@ -11,11 +11,15 @@ struct SQLWorkbenchView: View {
             WorkbenchToolbar(model: model)
             Divider()
             VSplitView {
-                SQLEditor(text: $model.text, selection: $model.selection, errorRange: model.errorRange,
-                          completionProvider: { [model] text, cursor in await model.completions(text: text, cursor: cursor) },
-                          focusOnAppear: true)
-                    .frame(minHeight: 110, idealHeight: 260)
-                    .background(Color(nsColor: .textBackgroundColor))
+                VStack(spacing: 0) {
+                    SQLEditor(text: $model.text, selection: $model.selection, diagnostics: model.diagnostics,
+                              completionProvider: { [model] text, cursor in await model.completions(text: text, cursor: cursor) },
+                              onEdit: { [model] edits in model.editorDidEdit(edits) },
+                              focusOnAppear: true)
+                    DiagnosticsBar(model: model)
+                }
+                .frame(minHeight: 110, idealHeight: 260)
+                .background(Color(nsColor: .textBackgroundColor))
                 ResultPanel(model: model)
                     .frame(minHeight: 150, idealHeight: 380)
             }
@@ -193,6 +197,136 @@ private struct TransactionBadge: View {
             Badge(text: "Transaction aborted", color: .red, systemImage: "exclamationmark.triangle.fill")
                 .help("A statement failed inside the transaction; run ROLLBACK before continuing.")
         }
+    }
+}
+
+// MARK: - Diagnostics
+
+/// A status line under the editor, always present so the editor never resizes: the diagnostic at the cursor (position,
+/// message, navigation) and the cursor's own line and column.
+private struct DiagnosticsBar: View {
+    let model: SQLTabModel
+    /// The diagnostic last navigated to; disambiguates diagnostics that start at the same offset.
+    @State private var preferred: SQLDiagnostic?
+
+    var body: some View {
+        let diagnostics = model.diagnostics
+        let cursor = model.selection.location
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 8) {
+                if let index = SQLDiagnosticNavigator.currentIndex(in: diagnostics, cursor: cursor, preferred: preferred) {
+                    problem(diagnostics, index)
+                }
+                Spacer(minLength: 8)
+                let position = model.position(of: cursor)
+                Text("Ln \(position.line), Col \(position.column)")
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(.bar)
+        }
+    }
+
+    @ViewBuilder
+    private func problem(_ diagnostics: [SQLDiagnostic], _ index: Int) -> some View {
+        let diagnostic = diagnostics[index]
+        let position = model.position(of: diagnostic.range.lowerBound)
+        Image(systemName: diagnostic.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+            .foregroundStyle(diagnostic.severity == .error ? Color.red : Color.orange)
+        Text("Line \(position.line), column \(position.column)")
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        Text(diagnostic.message)
+            .truncationMode(.tail)
+            .help(diagnostic.message)
+        Text(diagnostic.source == .server ? "PostgreSQL" : "Syntax check")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .help(diagnostic.source == .server ? "Reported by PostgreSQL when the statement ran"
+                                               : "Found while typing; nothing was sent to the server")
+        if diagnostics.count > 1 {
+            Text("\(index + 1) of \(diagnostics.count)").monospacedDigit().foregroundStyle(.secondary)
+            Button {
+                go(to: diagnostics[(index + diagnostics.count - 1) % diagnostics.count])
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .help("Previous problem")
+            Button {
+                go(to: diagnostics[(index + 1) % diagnostics.count])
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .help("Next problem")
+        } else {
+            Button("Show") { go(to: diagnostic) }
+                .help("Select the marked text in the editor")
+        }
+    }
+
+    private func go(to diagnostic: SQLDiagnostic) {
+        preferred = diagnostic
+        model.reveal(diagnostic)
+    }
+}
+
+/// A failed statement: error kind with its **editor** position, SQLSTATE and condition name, the message, and Show in
+/// Editor while the marker is valid. Copy copies the whole error (message, SQLSTATE, detail and hint).
+private struct StatementErrorView: View {
+    let message: String
+    let outcome: StatementOutcome
+    let model: SQLTabModel
+
+    var body: some View {
+        let parsed = outcome.serverError ?? SQLServerError(message: message)
+        let marker = model.serverDiagnostic(for: outcome)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                // Only an editor position: the server's is relative to the text sent.
+                Text(parsed.title(at: marker.map { model.position(of: $0.range.lowerBound) })).font(.headline)
+                if let state = parsed.sqlState {
+                    Text([state, parsed.conditionName].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary.opacity(0.6), in: Capsule())
+                        .help("SQLSTATE")
+                }
+                Spacer()
+                if let marker {
+                    Button("Show in Editor") { model.reveal(marker) }
+                        .help("Select the text this error is about")
+                }
+                Button {
+                    Pasteboard.copy(message)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy error")
+            }
+            Text(parsed.summary)
+                .font(.callout)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let hint = parsed.hint, !hint.isEmpty {
+                Label(SQLServerError.shortenedForDisplay(hint), systemImage: "lightbulb")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(10)
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: Theme.Metrics.smallCornerRadius))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Metrics.smallCornerRadius).strokeBorder(Color.red.opacity(0.25)))
     }
 }
 
@@ -390,7 +524,7 @@ private struct OutcomeView: View {
         } else if let error = outcome.errorMessage {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ErrorBanner(message: error)
+                    StatementErrorView(message: error, outcome: outcome, model: model)
                     if let fields = outcome.error?.fields {
                         KeyValueList(items: Self.errorDetails(fields), monospacedValues: false)
                     }
@@ -455,15 +589,14 @@ private struct OutcomeView: View {
         }
     }
 
+    /// Fields not in the error's header. The statement position (`P`) is relative to the text sent, so the editor
+    /// position in the header replaces it.
     static func errorDetails(_ fields: ServerMessageFields) -> [(String, String)] {
         var items: [(String, String)] = []
-        if let state = fields.sqlState { items.append(("SQLSTATE", state)) }
-        if let detail = fields.detail { items.append(("Detail", detail)) }
-        if let hint = fields.hint { items.append(("Hint", hint)) }
-        if let position = fields.position { items.append(("Position", "character \(position)")) }
-        if let context = fields.whereContext { items.append(("Context", context)) }
+        if let detail = fields.detail { items.append(("Detail", SQLServerError.shortenedForDisplay(detail))) }
+        if let context = fields.whereContext { items.append(("Context", SQLServerError.shortenedForDisplay(context))) }
         if let query = fields.internalQuery {
-            items.append(("Internal query", query + (fields.internalPosition.map { " (at character \($0))" } ?? "")))
+            items.append(("Internal query", SQLServerError.shortenedForDisplay(query) + (fields.internalPosition.map { " (at character \($0))" } ?? "")))
         }
         let object = [fields.schemaName, fields.tableName, fields.columnName].compactMap { $0 }.joined(separator: ".")
         if !object.isEmpty { items.append(("Object", object)) }

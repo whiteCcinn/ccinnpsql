@@ -28,6 +28,8 @@ let package = Package(
         .testTarget(name: "PostgresKitTests", dependencies: ["PostgresWire", "PostgresKit"], swiftSettings: settings),
         .testTarget(name: "CcinnPsqlKitTests", dependencies: ["PostgresKit", "CcinnPsqlKit"], swiftSettings: settings),
         .testTarget(name: "IntegrationTests", dependencies: ["PostgresWire", "PostgresKit", "CcinnPsqlKit"], swiftSettings: settings),
+        // AppKit behaviour of the app's views (editor text storage, input methods).
+        .testTarget(name: "CcinnPsqlAppTests", dependencies: ["CcinnPsql", "CcinnPsqlKit"], swiftSettings: settings),
     ],
     swiftLanguageModes: [.v6]
 )

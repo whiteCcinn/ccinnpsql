@@ -220,9 +220,14 @@ public struct ExplainPlan: Sendable {
     public static func statement(for sql: String, analyze: Bool, buffers: Bool) -> String {
         var body = sql.trimmingCharacters(in: .whitespacesAndNewlines)
         while body.hasSuffix(";") { body.removeLast() }
+        return statementPrefix(analyze: analyze, buffers: buffers) + body
+    }
+
+    /// What `statement(for:…)` puts before the statement.
+    public static func statementPrefix(analyze: Bool, buffers: Bool) -> String {
         var options = ["FORMAT JSON"]
         if analyze { options.append("ANALYZE") }
         if buffers { options.append("BUFFERS") }
-        return "EXPLAIN (\(options.joined(separator: ", "))) \(body)"
+        return "EXPLAIN (\(options.joined(separator: ", "))) "
     }
 }

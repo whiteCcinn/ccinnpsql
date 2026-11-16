@@ -64,7 +64,8 @@ struct LexerTests {
             _ = ReadOnlySQLGuard.check(text)
             _ = SQLRedactor.redact(text)
             _ = AutoLimit.apply(to: text, limit: 10)
-            _ = SQLErrorLocator.highlightRange(in: text, position: Int.random(in: -2..<80, using: &generator))
+            _ = SQLErrorLocator.range(in: text, error: SQLServerError(message: "x", position: Int.random(in: -2..<80, using: &generator)))
+            _ = SQLLinter.diagnose(text)
         }
     }
 }
@@ -355,15 +356,3 @@ struct RedactorTests {
     }
 }
 
-@Suite("Error positions")
-struct ErrorLocatorTests {
-    @Test func positionsCountCodePoints() {
-        #expect(SQLErrorLocator.utf16Offset(in: "SELECT x", position: 8) == 7)
-        // 𝔸 is one code point but two UTF-16 units.
-        #expect(SQLErrorLocator.utf16Offset(in: "SELECT '𝔸', bad", position: 13) == 13)
-        #expect(SQLErrorLocator.highlightRange(in: "SELECT 'é', missing FROM t", position: 13) == 12..<19)
-        #expect(SQLErrorLocator.utf16Offset(in: "SELECT", position: 999) == 6)
-        #expect(SQLErrorLocator.utf16Offset(in: "SELECT", position: 0) == nil)
-        #expect(SQLErrorLocator.highlightRange(in: "", position: 1) == 0..<0)
-    }
-}

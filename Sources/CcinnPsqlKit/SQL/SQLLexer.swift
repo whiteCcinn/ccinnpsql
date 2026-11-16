@@ -29,6 +29,21 @@ public struct SQLToken: Sendable, Equatable {
     public var nsRange: NSRange { NSRange(location: range.lowerBound, length: range.count) }
 }
 
+/// A token that runs to the end of the input without its closing delimiter.
+public struct SQLUnterminatedToken: Sendable, Equatable {
+    public enum Kind: Sendable, Equatable {
+        case string
+        case quotedIdentifier
+        case dollarQuote(tag: String)
+        /// Block comments nest in PostgreSQL; `openDepth` closing `*/` are missing.
+        case blockComment(openDepth: Int)
+    }
+
+    public let kind: Kind
+    /// The opening delimiter with its prefix: `'`, `E'`, `U&'`, `"`, `U&"`, `$tag$` or `/*`.
+    public let opener: Range<Int>
+}
+
 /// Tokenizer for PostgreSQL SQL (design D12). Never fails: unterminated strings and comments extend to the end
 /// of the input, unknown characters become operators. Linear time over UTF-16 code units; nested block comments
 /// and dollar quotes are understood, so keywords inside strings, comments and function bodies are never seen.
@@ -160,6 +175,11 @@ public struct SQLLexer: Sendable {
     }
 
     private func endOfBlockComment(from index: Int) -> Int {
+        scanBlockComment(from: index).end
+    }
+
+    /// End of a nested block comment and the depth still open there (0 when it is closed).
+    private func scanBlockComment(from index: Int) -> (end: Int, openDepth: Int) {
         var depth = 0
         var index = index
         while index < units.count {
@@ -169,15 +189,19 @@ public struct SQLLexer: Sendable {
             } else if units[index] == 0x2A, peek(index + 1) == 0x2F {
                 depth -= 1
                 index += 2
-                if depth == 0 { return index }
+                if depth == 0 { return (index, 0) }
             } else {
                 index += 1
             }
         }
-        return units.count
+        return (units.count, max(0, depth))
     }
 
     private func endOfQuoted(from index: Int, quote: UInt16, backslashEscapes: Bool) -> Int {
+        scanQuoted(from: index, quote: quote, backslashEscapes: backslashEscapes).end
+    }
+
+    private func scanQuoted(from index: Int, quote: UInt16, backslashEscapes: Bool) -> (end: Int, closed: Bool) {
         var index = index + 1
         while index < units.count {
             let unit = units[index]
@@ -190,11 +214,11 @@ public struct SQLLexer: Sendable {
                     index += 2
                     continue
                 }
-                return index + 1
+                return (index + 1, true)
             }
             index += 1
         }
-        return units.count
+        return (units.count, false)
     }
 
     /// `$1`, `$23`: positional parameter end, nil otherwise.
@@ -216,13 +240,57 @@ public struct SQLLexer: Sendable {
     }
 
     private func endOfDollarQuote(from start: Int, tagEnd: Int) -> Int {
+        scanDollarQuote(from: start, tagEnd: tagEnd).end
+    }
+
+    private func scanDollarQuote(from start: Int, tagEnd: Int) -> (end: Int, closed: Bool) {
         let tag = units[start..<tagEnd]
         var index = tagEnd
         while index + tag.count <= units.count {
-            if units[index] == 0x24, units[index..<(index + tag.count)].elementsEqual(tag) { return index + tag.count }
+            if units[index] == 0x24, units[index..<(index + tag.count)].elementsEqual(tag) { return (index + tag.count, true) }
             index += 1
         }
-        return units.count
+        return (units.count, false)
+    }
+
+    // MARK: Unterminated tokens
+
+    /// A string, quoted identifier, dollar quote or block comment that runs to the end of the input without its
+    /// closing delimiter (PostgreSQL rejects it there). Only the last token can be one, so this rescans at most once.
+    public func unterminated(_ token: SQLToken) -> SQLUnterminatedToken? {
+        let start = token.range.lowerBound
+        guard token.range.upperBound >= units.count, start >= 0, start < units.count else { return nil }
+        let first = units[start]
+        switch token.kind {
+        case .comment:
+            guard first == 0x2F, peek(start + 1) == 0x2A else { return nil } // `--` comments end at the line end
+            let depth = scanBlockComment(from: start).openDepth
+            return depth > 0 ? SQLUnterminatedToken(kind: .blockComment(openDepth: depth), opener: start..<(start + 2)) : nil
+        case .string where first == 0x24:
+            guard let tagEnd = dollarTagEnd(from: start), !scanDollarQuote(from: start, tagEnd: tagEnd).closed else { return nil }
+            return SQLUnterminatedToken(kind: .dollarQuote(tag: text(in: start..<tagEnd)), opener: start..<tagEnd)
+        case .string, .quotedIdentifier:
+            // The quote follows an optional prefix: `E'` (backslash escapes), `B'`, `X'`, `N'`, `U&'`, `U&"`.
+            var quoteIndex = start
+            if first != 0x27, first != 0x22 { quoteIndex = peek(start + 1) == 0x26 ? start + 2 : start + 1 }
+            guard let quote = peek(quoteIndex), quote == 0x27 || quote == 0x22 else { return nil }
+            let escapes = token.kind == .string && (first == 0x45 || first == 0x65)
+            guard !scanQuoted(from: quoteIndex, quote: quote, backslashEscapes: escapes).closed else { return nil }
+            return SQLUnterminatedToken(kind: token.kind == .string ? .string : .quotedIdentifier, opener: start..<(quoteIndex + 1))
+        default:
+            return nil
+        }
+    }
+
+    /// Range of the text between a dollar-quoted string's tags (to the end of the input when it is unterminated);
+    /// `nil` for any other token.
+    public func dollarQuotedBody(_ token: SQLToken) -> Range<Int>? {
+        let start = token.range.lowerBound
+        guard token.kind == .string, start >= 0, start < units.count, units[start] == 0x24,
+              let tagEnd = dollarTagEnd(from: start), tagEnd <= token.range.upperBound else { return nil }
+        let tagLength = tagEnd - start
+        let closed = token.range.count >= 2 * tagLength && units[(token.range.upperBound - tagLength)..<token.range.upperBound].elementsEqual(units[start..<tagEnd])
+        return tagEnd..<(closed ? token.range.upperBound - tagLength : token.range.upperBound)
     }
 
     /// `E'…'`, `U&'…'`, `U&"…"`, `B'…'`, `X'…'`, `N'…'` literals.
