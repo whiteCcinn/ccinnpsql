@@ -16,7 +16,15 @@ public actor SQLSession {
     public nonisolated let database: String
     private var connection: PostgresConnection?
     private var settings = SessionSettingsLog()
-    private var isBusy = false
+    /// A run is in progress (connecting or executing).
+    public private(set) var isBusy = false
+    /// Stop was pressed while the current run had not reached the connection yet (still connecting). The run
+    /// then stops before sending its statement instead of ignoring the request.
+    private var cancelRequestedBeforeStart = false
+    /// Cancels the statement in flight (set while one runs).
+    private var cancelStatement: (@Sendable () -> Void)?
+    /// The current run's statement has been handed to the connection (Stop then cancels it).
+    public var isStatementRunning: Bool { cancelStatement != nil }
     /// Increases with every statement so stale completions can be told apart.
     private var runGeneration: UInt64 = 0
     /// The session lost its connection while a transaction was open (it was rolled back by the server).
@@ -39,18 +47,19 @@ public actor SQLSession {
         // One statement at a time; a rejected second run must not touch the running one's state.
         guard !isBusy else { throw PostgresError(.busy, "This editor is already running a statement") }
         isBusy = true
+        cancelRequestedBeforeStart = false
         defer { isBusy = false }
         let connection = try await ensureConnection()
         runGeneration &+= 1
         lostTransaction = false
         settings.align(with: await connection.transactionStatus)
+        if cancelRequestedBeforeStart { throw PostgresError.cancelled() }
         do {
-            let result: QueryResult
-            switch mode {
-            case .extended:
-                result = try await connection.extendedQuery(sql, limits: limits)
-            case .simple:
-                result = try await connection.simpleQuery(sql, limits: limits)
+            let result: QueryResult = try await runOwned {
+                switch mode {
+                case .extended: try await connection.extendedQuery(sql, limits: limits)
+                case .simple: try await connection.simpleQuery(sql, limits: limits)
+                }
             }
             if client.serverInfo.keepsSessionState {
                 // Statement by statement: a script's settings stick only as far as its transactions committed.
@@ -77,11 +86,13 @@ public actor SQLSession {
     public func copyOut(_ sql: String, sink: @escaping @Sendable ([UInt8]) async throws -> Void) async throws -> CommandTag? {
         guard !isBusy else { throw PostgresError(.busy, "This editor is already running a statement") }
         isBusy = true
+        cancelRequestedBeforeStart = false
         defer { isBusy = false }
         let connection = try await ensureConnection()
         runGeneration &+= 1
+        if cancelRequestedBeforeStart { throw PostgresError.cancelled() }
         do {
-            return try await connection.copyOut(sql, sink: sink)
+            return try await runOwned { try await connection.copyOut(sql, sink: sink) }
         } catch {
             if await connection.isBroken {
                 if self.connection === connection { self.connection = nil }
@@ -93,9 +104,29 @@ public actor SQLSession {
         }
     }
 
-    /// Asks the server to stop the running statement (generation-checked: never touches a later statement).
+    /// Stops the current run: before it reaches the server it is not sent at all; once handed to the
+    /// connection its task is cancelled, which sends a CancelRequest as soon as the statement is registered
+    /// (task cancellation is sticky, so there is no window in which Stop is lost). Never touches a later run.
     public func cancel() {
-        connection?.cancelRunningStatement()
+        guard isBusy else { return }
+        if let cancelStatement {
+            cancelStatement()
+        } else {
+            cancelRequestedBeforeStart = true
+        }
+    }
+
+    /// Runs the statement in a task the session owns, so `cancel()` can stop it; the caller's cancellation
+    /// is forwarded too.
+    private func runOwned<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let task = Task { try await operation() }
+        cancelStatement = { task.cancel() }
+        defer { cancelStatement = nil }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     public func close() async {

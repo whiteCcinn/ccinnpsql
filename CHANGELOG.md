@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A quiet automatic check at most once a day (retried after an hour when offline), on by default, switchable in **Settings → General → Updates**.
 - Project links: the Help menu now has **CcinnPsql on GitHub**, **Release Notes** and **Report an Issue…**; the About window shows the GitHub link; Settings → General shows the version and project links.
 
+### Fixed
+
+- **Stop** pressed while the SQL editor is still connecting, or the instant a statement starts, is no longer ignored: a statement that has not reached the server is not sent, and one that has is cancelled.
+
 ## [1.0.0] - 2026-11-15
 
 First public release.

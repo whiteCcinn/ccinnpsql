@@ -337,10 +337,14 @@ final class FakeNetwork: @unchecked Sendable {
     let servers: OSAllocatedUnfairLock<[FakePostgresServer]>
     let cancelEndpoints = OSAllocatedUnfairLock<[Endpoint]>(initialState: [])
     private let cancelDelay: Double
+    /// Seconds to wait before connection N (0-based, in creation order) is handed out.
+    private let connectDelays: [Int: Double]
     private let makeServer: @Sendable (Int) -> FakePostgresServer
 
-    init(cancelDelay: Double = 0, makeServer: @escaping @Sendable (Int) -> FakePostgresServer = { FakePostgresServer(pid: Int32(100 + $0)) }) {
+    init(cancelDelay: Double = 0, connectDelays: [Int: Double] = [:],
+         makeServer: @escaping @Sendable (Int) -> FakePostgresServer = { FakePostgresServer(pid: Int32(100 + $0)) }) {
         self.cancelDelay = cancelDelay
+        self.connectDelays = connectDelays
         self.makeServer = makeServer
         servers = OSAllocatedUnfairLock(initialState: [])
     }
@@ -353,11 +357,12 @@ final class FakeNetwork: @unchecked Sendable {
                 let servers = self.servers
                 return FakeCancelTransport(delay: cancelDelay) { pid in servers.withLock { list in list.first { $0.pid == pid } } }
             }
-            let server = servers.withLock { servers -> FakePostgresServer in
+            let (server, index) = servers.withLock { servers -> (FakePostgresServer, Int) in
                 let created = makeServer(servers.count)
                 servers.append(created)
-                return created
+                return (created, servers.count - 1)
             }
+            if let delay = connectDelays[index] { try await Task.sleep(for: .milliseconds(Int(delay * 1000))) }
             return server
         }
     }
