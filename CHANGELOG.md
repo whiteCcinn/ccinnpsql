@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
 ### Added
 
 - **Check for Updates…** in the app menu. When a newer release exists, CcinnPsql shows its version and release notes. **Download & Open** downloads the disk image, verifies its size and SHA-256 against the release's `SHA256SUMS.txt`, saves it to Downloads without overwriting anything, and opens it. **Release Page**, **Skip This Version** and **Later** are also available.
@@ -30,5 +32,6 @@ First public release.
 - SQL workbench: PostgreSQL highlighting, context-aware completion, run current / selection / all / as script, automatic LIMIT, exact error underline with SQLSTATE, detail and hint, notices, transaction state, cancellation, history, CSV/TSV/JSON/Markdown/INSERT export and COPY export, charts, visual EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON), and a LISTEN/NOTIFY panel.
 - MCP server (`CcinnPsql mcp`) so AI clients such as Claude Code, Codex and Claude Desktop can list connections, inspect servers, schemas, tables, statistics, activity, replication and top statements, and run read-only queries (checked by the app, including SQL inside string literals, executed in a READ ONLY transaction, with the session reset after every call) on connections the user opted in; read & write access is opt-in per connection, and every call is audited with secrets redacted.
 
-[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/whiteCcinn/ccinnpsql/releases/tag/v1.0.0
