@@ -8,8 +8,9 @@ struct CcinnPsqlApp: App {
     @AppStorage("appearance") private var appearance = AppearancePreference.system.rawValue
 
     var body: some Scene {
-        WindowGroup("CcinnPsql", id: "main") {
-            RootView()
+        // Every window has its own connection. A request opens a window that connects right away.
+        WindowGroup("CcinnPsql", id: RootView.windowGroupID, for: WindowRequest.self) { $request in
+            RootView(request: request)
                 .frame(minWidth: 1040, minHeight: 640)
                 .preferredColorScheme(LaunchArguments.appearanceOverride ?? AppearancePreference(rawValue: appearance)?.colorScheme)
                 .tint(Theme.accent)
@@ -79,7 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// Per-window root: connection manager, progress, or workspace.
 struct RootView: View {
+    static let windowGroupID = "main"
+
+    /// Set when the window was opened for a connection (Open in New Window, New Window with This Connection).
+    let request: WindowRequest?
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @State private var session = WindowSession()
     private let store = AppServices.shared.profiles
 
@@ -103,7 +109,10 @@ struct RootView: View {
         .presentsSoftwareUpdates()
         .onDisappear { session.disconnect() }
         .task {
-            LaunchArguments.consume(into: session, store: store)
+            // A window this process opened for a connection connects; any other window (⌘N, or one macOS restored)
+            // takes the plain path below.
+            if session.connect(request, store: store) { return }
+            LaunchArguments.consume(into: session, store: store) { openWindow(id: Self.windowGroupID, value: $0) }
             if let tab = LaunchArguments.value("--settings") {
                 UserDefaults.standard.set(tab, forKey: "settingsTab")
                 try? await Task.sleep(for: .milliseconds(800))
@@ -158,6 +167,7 @@ struct ConnectingView: View {
 ///     CcinnPsql --connect host:port [--user u] [--database db] [--sslmode prefer] [--object schema.name]
 ///               [--section overview|structure|partitions|statistics|ddl|data|grants] [--sql "…"] [--auto-run]
 ///               [--view grid|chart|plan] [--explain] [--operations activity|locks|replication|…] [--notifications]
+///               [--duplicate-window]
 ///     … [--appearance light|dark] [--settings mcp] [--snapshot out.png --snapshot-delay 6 --quit-after-snapshot]
 ///
 /// The password for `--connect` comes from the environment (`CCINNPSQL_PASSWORD`), never the command line.
@@ -180,7 +190,9 @@ enum LaunchArguments {
         }
     }
 
-    static func consume(into session: WindowSession, store: ProfileStore) {
+    /// Applies the launch arguments to the first window, once per process. `openWindow` opens another window for a
+    /// request (`--duplicate-window`).
+    static func consume(into session: WindowSession, store: ProfileStore, openWindow: @escaping @MainActor (WindowRequest) -> Void) {
         guard !consumed else { return }
         consumed = true
         let profile: ConnectionProfile
@@ -200,6 +212,7 @@ enum LaunchArguments {
             return
         }
         session.connect(profile: profile, store: store, password: password) { workspace in
+            if has("--duplicate-window"), let request = session.duplicateRequest() { openWindow(request) }
             Task { @MainActor in
                 if let target = value("--object"), let dot = target.firstIndex(of: ".") {
                     let schema = String(target[..<dot])
@@ -234,8 +247,9 @@ enum LaunchArguments {
     }
 }
 
-/// `--snapshot <file.png> [--snapshot-delay seconds] [--quit-after-snapshot] [--snapshot-window title]`: renders a window
-/// into a PNG without activating the app (accessory policy, transparent windows); needs no screen-recording permission.
+/// `--snapshot <file.png> [--snapshot-delay seconds] [--quit-after-snapshot] [--snapshot-window title]`: renders the window
+/// with that title, else the key or frontmost window (the newest one, e.g. opened by `--duplicate-window`), into a PNG
+/// without activating the app (accessory policy, transparent windows); needs no screen-recording permission.
 @MainActor
 enum SnapshotTool {
     nonisolated static var isRequested: Bool { LaunchArguments.value("--snapshot") != nil }
@@ -252,8 +266,10 @@ enum SnapshotTool {
         let quit = LaunchArguments.has("--quit-after-snapshot")
         let wantedTitle = LaunchArguments.value("--snapshot-window")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            let candidates = NSApp.windows.filter { $0.isVisible && $0.sheetParent == nil && $0.frame.width > 400 }
-            let chosen = wantedTitle.flatMap { title in candidates.first { $0.title.localizedCaseInsensitiveContains(title) } } ?? candidates.first
+            // Front to back: the newest window comes first even when the app is inactive and no window is key.
+            let candidates = NSApp.orderedWindows.filter { $0.isVisible && $0.sheetParent == nil && $0.frame.width > 400 }
+            let chosen = wantedTitle.flatMap { title in candidates.first { $0.title.localizedCaseInsensitiveContains(title) } }
+                ?? candidates.first { $0.isKeyWindow } ?? candidates.first
             if let window = chosen, let data = render(window) {
                 try? data.write(to: URL(fileURLWithPath: path))
             }
@@ -342,9 +358,17 @@ extension FocusedValues {
 
 struct AppCommands: Commands {
     @FocusedValue(\.windowSession) private var session
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
+            // File ▸ New Window (⌘N) comes from the window group and opens the connection screen.
+            Button("New Window with This Connection") {
+                if let request = session?.duplicateRequest() { openWindow(id: RootView.windowGroupID, value: request) }
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .disabled(session?.workspace == nil)
+            Divider()
             Button("New Query") { session?.workspace?.openSQL() }
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(session?.workspace == nil)

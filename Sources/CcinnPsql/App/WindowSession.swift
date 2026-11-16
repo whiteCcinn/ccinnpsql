@@ -71,6 +71,32 @@ final class WindowSession {
         }
     }
 
+    /// Connects a window opened by a request of this process and returns `true`. Returns `false`, doing nothing, for a
+    /// window opened without a request (⌘N) and for one macOS restored after a relaunch (its request has no handed-off
+    /// connection): both take the plain path, the connection screen.
+    func connect(_ request: WindowRequest?, store: ProfileStore) -> Bool {
+        guard let connection = Self.handoff.take(request) else { return false }
+        connect(profile: connection.profile, store: store, password: connection.password)
+        return true
+    }
+
+    /// A request for another window connected like this one: the same profile and the password in use, so unsaved
+    /// connections and passwords not in the Keychain work too. `nil` while not connected.
+    func duplicateRequest() -> WindowRequest? {
+        guard let workspace else { return nil }
+        let connection = WindowConnection(profile: workspace.profile, password: workspace.client.configuration.password)
+        return Self.handoff.request(profileID: workspace.profile.id, payload: connection)
+    }
+
+    /// A request for a new window that connects to a saved profile, reading its password from the Keychain as Connect
+    /// does.
+    static func request(opening profile: ConnectionProfile) -> WindowRequest {
+        handoff.request(profileID: profile.id, payload: WindowConnection(profile: profile, password: nil))
+    }
+
+    /// Connections handed to windows this process opens (see `WindowHandoff`).
+    private static let handoff = WindowHandoff<WindowConnection>()
+
     private func updateStatus(name: String, status: String) {
         guard case .connecting = phase else { return }
         phase = .connecting(name: name, status: status)
@@ -90,6 +116,13 @@ final class WindowSession {
         workspace?.shutdown()
         phase = .connections
     }
+}
+
+/// The connection a new window opens: a profile and, when duplicating, the password in use (`nil` = Keychain). The
+/// SSH secret always comes from the Keychain, as for every connect.
+struct WindowConnection {
+    let profile: ConnectionProfile
+    let password: String?
 }
 
 /// User-facing text for any error.
