@@ -105,6 +105,14 @@ CcinnPsql 一键回答这些问题。它是原生 SwiftUI/AppKit 应用，自带
 
 每个发布都在 `SHA256SUMS.txt` 中列出 SHA-256 校验和。
 
+### 更新
+
+选择 **CcinnPsql → 检查更新…（Check for Updates…）**。如果有新版本，CcinnPsql 会显示更新内容。**下载并打开（Download & Open）** 会把磁盘映像保存到“下载”文件夹，按该版本的 `SHA256SUMS.txt` 校验后再打开。退出 CcinnPsql，然后把新版本拖到 **应用程序** 文件夹即可。
+
+CcinnPsql 每天也会在后台自动检查一次，可以在 **设置 → 通用 → 更新** 中关闭。检查只访问 GitHub 的公开 Releases API，也可以选择 **跳过此版本（Skip This Version）**。
+
+项目主页、发布说明和问题反馈入口也在 **帮助** 菜单和“关于”窗口中。
+
 ## 快速上手
 
 1. 点击 **New Connection**，填写主机、端口（默认 **5432**）、数据库、用户与密码。选择 SSL 模式（verify-ca / verify-full 可指定 CA 文件），需要时配置 SSH 隧道。
