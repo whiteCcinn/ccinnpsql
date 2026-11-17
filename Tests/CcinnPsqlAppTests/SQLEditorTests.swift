@@ -55,6 +55,65 @@ private final class EditorHarness {
 @Suite("SQL editor", .serialized)
 @MainActor
 struct SQLEditorTests {
+    @Test func formattingIsOneUndoableEditThatEditTrackingSees() throws {
+        let original = "select a, b from t where x = 'it''s'"
+        let failure = SQLDiagnostic(range: 7..<8, scope: 0..<36, severity: .error, source: .server, message: "m")
+        let harness = EditorHarness(original, diagnostics: [failure])
+        let undo = try #require(harness.textView.undoManager)
+        undo.groupsByEvent = false
+        let formatted = try #require(SQLFormatter.format(original))
+        undo.beginUndoGrouping()
+        #expect(harness.textView.replace(NSRange(location: 0, length: (original as NSString).length), in: original, with: formatted,
+                                         actionName: "Format SQL", selecting: NSRange(location: 3, length: 0)))
+        undo.endUndoGrouping()
+        #expect(harness.textView.string == formatted)
+        #expect(harness.text == formatted, "the binding is updated like typing")
+        #expect(!harness.reportedEdits.isEmpty, "edit tracking sees the replacement")
+        #expect(harness.coordinator.diagnostics.isEmpty, "a marker on the reformatted statement is stale")
+        #expect(harness.textView.selectedRange() == NSRange(location: 3, length: 0))
+        #expect(undo.undoActionName == "Format SQL")
+        undo.undo()
+        #expect(harness.textView.string == original, "one ⌘Z restores the original")
+        // Out-of-date ranges are refused instead of trapping.
+        #expect(!harness.textView.replace(NSRange(location: 0, length: 10_000), in: original, with: "x", actionName: "Format SQL",
+                                          selecting: NSRange(location: 0, length: 0)))
+    }
+
+    // A format result lands only on the exact text it was computed from: never during a composition, never on newer text.
+    @Test func formattingRefusesWhileComposingOrOnChangedText() throws {
+        let original = "select a from t"
+        let harness = EditorHarness(original)
+        let controller = SQLEditorController()
+        #expect(controller.snapshot() == nil, "no editor attached yet")
+        #expect(controller.replace(NSRange(location: 0, length: 1), in: original, with: "S", actionName: "Format SQL",
+                                   selecting: NSRange(location: 0, length: 0)) == .detached)
+        controller.textView = harness.textView
+        let formatted = try #require(SQLFormatter.format(original))
+        let whole = NSRange(location: 0, length: (original as NSString).length)
+        // An input method re-marks committed text: the string is unchanged, but the composition must survive.
+        harness.textView.setMarkedText("t", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: 14, length: 1))
+        #expect(harness.textView.hasMarkedText())
+        #expect(harness.textView.string == original)
+        #expect(controller.replace(whole, in: original, with: formatted, actionName: "Format SQL", selecting: NSRange(location: 0, length: 0)) == .refused)
+        #expect(harness.textView.hasMarkedText())
+        harness.textView.unmarkText()
+        harness.textView.setSelectedRange(NSRange(location: 15, length: 0))
+        harness.textView.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(controller.snapshot() == nil, "nothing to format while an input method composes")
+        #expect(controller.replace(whole, in: original, with: formatted, actionName: "Format SQL", selecting: NSRange(location: 0, length: 0)) == .refused)
+        #expect(harness.textView.hasMarkedText(), "the composition survives")
+        #expect(harness.textView.string == "select a from tni")
+        harness.textView.unmarkText()
+        // The result was computed from older text: refused, nothing changes.
+        #expect(controller.replace(whole, in: original, with: formatted, actionName: "Format SQL", selecting: NSRange(location: 0, length: 0)) == .refused)
+        #expect(harness.textView.string == "select a from tni")
+        let current = try #require(controller.snapshot())
+        #expect(current.text == "select a from tni")
+        #expect(controller.replace(NSRange(location: 0, length: 6), in: current.text, with: "SELECT", actionName: "Format SQL",
+                                   selecting: NSRange(location: 0, length: 0)) == .replaced)
+        #expect(harness.textView.string == "SELECT a from tni")
+    }
+
     // A re-render while an input method composes must not overwrite the marked text.
     @Test func compositionSurvivesARenderWithLaggingText() {
         let harness = EditorHarness("SELECT 1")
@@ -136,5 +195,116 @@ struct SQLEditorTests {
         harness.type("-- note\n", at: 0)
         #expect(harness.coordinator.diagnostics.map(\.range) == [25..<28])
         #expect(harness.textView.string.utf16.count == 48)
+    }
+}
+
+/// A tab's text when no editor is attached, and what Format SQL reported.
+@MainActor
+private final class FormatHost: SQLFormatHost {
+    var text: String
+    var selection: NSRange
+    var outcomes: [SQLFormatRunner.Outcome] = []
+
+    init(_ text: String) {
+        self.text = text
+        selection = NSRange(location: 0, length: 0)
+    }
+
+    func formatDidFinish(_ outcome: SQLFormatRunner.Outcome) { outcomes.append(outcome) }
+}
+
+@Suite("Format SQL", .serialized)
+@MainActor
+struct SQLFormatRunnerTests {
+    private func attached(_ text: String, formatter: SQLFormatRunner.Formatter? = nil) -> (EditorHarness, FormatHost, SQLFormatRunner) {
+        let harness = EditorHarness(text)
+        let controller = SQLEditorController()
+        controller.textView = harness.textView
+        let host = FormatHost(text)
+        let runner = formatter.map { SQLFormatRunner(editor: controller, host: host, formatter: $0) } ?? SQLFormatRunner(editor: controller, host: host)
+        return (harness, host, runner)
+    }
+
+    @Test func aFormatIsAppliedAndReported() async {
+        let (harness, host, runner) = attached("select a,b from t")
+        await runner.format(options: SQLFormatOptions())?.value
+        #expect(harness.textView.string == "SELECT\n  a,\n  b\nFROM t")
+        #expect(host.outcomes == [.formatted])
+        #expect(!runner.isRunning)
+        await runner.format(options: SQLFormatOptions())?.value
+        #expect(host.outcomes == [.formatted, .alreadyFormatted], "nothing to change is said, not silent")
+    }
+
+    // Every way a format can be refused tells the user why.
+    @Test func aRefusedFormatIsNeverSilent() async {
+        // An input method is composing: nothing starts.
+        let (composing, composingHost, composingRunner) = attached("select a from t")
+        composing.textView.setSelectedRange(NSRange(location: 15, length: 0))
+        composing.textView.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(composingRunner.format(options: SQLFormatOptions()) == nil)
+        #expect(composingHost.outcomes == [.composing])
+        #expect(composing.textView.hasMarkedText())
+
+        // Edited while formatting: the running format stops and says so.
+        let (edited, editedHost, editedRunner) = attached("select a from t")
+        let task = editedRunner.format(options: SQLFormatOptions())
+        editedRunner.cancel(reportingChange: true)
+        await task?.value
+        #expect(editedHost.outcomes == [.textChanged])
+        #expect(edited.textView.string == "select a from t")
+
+        // The text changed without an edit notification: the editor refuses the stale result.
+        let (replaced, replacedHost, replacedRunner) = attached("select a from t")
+        let stale = replacedRunner.format(options: SQLFormatOptions())
+        replaced.textView.string = "select 2"
+        await stale?.value
+        #expect(replacedHost.outcomes == [.textChanged])
+        #expect(replaced.textView.string == "select 2")
+
+        // The formatter's own refusals.
+        let failures: [(SQLFormatError, SQLFormatRunner.Outcome)] = [
+            (.notEquivalent, .notEquivalent), (.tooComplex, .tooComplex), (.invalidSelection, .invalidSelection), (.cancelled, .textChanged),
+            (.versionDependent, .versionDependent), (.nulCharacter, .nulCharacter),
+        ]
+        for (error, outcome) in failures {
+            let (harness, host, runner) = attached("select a from t", formatter: { _, _, _ in .failure(error) })
+            await runner.format(options: SQLFormatOptions())?.value
+            #expect(host.outcomes == [outcome], "\(error)")
+            #expect(harness.textView.string == "select a from t")
+        }
+
+        // Closing the tab stops a format without a message.
+        let (_, closedHost, closedRunner) = attached("select a from t")
+        let closing = closedRunner.format(options: SQLFormatOptions())
+        closedRunner.cancel(reportingChange: false)
+        await closing?.value
+        #expect(closedHost.outcomes.isEmpty)
+    }
+
+    // A tab without an editor yet (opened from launch arguments) formats its own text, only if it did not change.
+    @Test func withoutAnEditorTheTabTextIsFormatted() async {
+        let host = FormatHost("select a,b from t")
+        let runner = SQLFormatRunner(editor: SQLEditorController(), host: host)
+        await runner.format(options: SQLFormatOptions())?.value
+        #expect(host.text == "SELECT\n  a,\n  b\nFROM t")
+        #expect(host.outcomes == [.formatted])
+
+        let changing = FormatHost("select a,b from t")
+        let changingRunner = SQLFormatRunner(editor: SQLEditorController(), host: changing)
+        let task = changingRunner.format(options: SQLFormatOptions())
+        changing.text = "select 1"
+        await task?.value
+        #expect(changing.text == "select 1")
+        #expect(changing.outcomes == [.textChanged])
+    }
+
+    @Test func everyOutcomeHasAStatusExceptAnAppliedFormat() {
+        let refusals: [SQLFormatRunner.Outcome] = [.composing, .textChanged, .notEquivalent, .tooComplex, .versionDependent, .nulCharacter, .invalidSelection]
+        for outcome in refusals {
+            #expect(outcome.status?.isError == true, "\(outcome)")
+            #expect(outcome.status.map { !$0.message.isEmpty } == true)
+        }
+        #expect(SQLFormatRunner.Outcome.alreadyFormatted.status?.isError == false)
+        #expect(SQLFormatRunner.Outcome.formatted.status == nil, "the edit shows itself")
     }
 }

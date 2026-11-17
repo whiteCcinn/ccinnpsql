@@ -48,6 +48,9 @@ struct MCPReadOnlyIntegrationTests {
         "SELECT * FROM ts_stat($q$SELECT to_tsvector(pg_advisory_lock(424243)::text)$q$)",
         "SELECT ts_rewrite('a'::tsquery, 'SELECT ''a''::tsquery, ''b''::tsquery')",
         "SELECT query_to_xml('SELECT pg_advisory_lock(424243)', true, false, '')",
+        // Independent review: `BEGIN ATOMIC` outside CREATE FUNCTION kept later statements in one.
+        "SELECT x.begin atomic FROM (SELECT 1 AS begin) x; COMMIT; SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; END",
+        "SHOW search_path begin atomic; SET search_path = evil; end",
     ]
 
     @Test(arguments: IT.versions)
@@ -159,6 +162,25 @@ struct MCPReadOnlyIntegrationTests {
                     "SELECT ccinnpsql_mcp_exec('SELECT ccinnpsql_mcp_exec(''SELECT pg_advisory_lock(424244)'')')"] {
             let refused = await tools.call(name: "run_query", arguments: ["sql": .string(sql)])
             #expect(refused.isError, "accepted: \(sql)")
+        }
+        // Independent review: a literal whose first statement was empty (`;COPY …`) passed the check, and the server ran the
+        // program through a function that EXECUTEs its argument. READ ONLY does not stop COPY … TO PROGRAM (the control).
+        var control = "no error"
+        do {
+            _ = try await admin.simpleQuery("BEGIN TRANSACTION READ ONLY; SELECT ccinnpsql_mcp_exec('COPY (SELECT 1) TO PROGRAM ''exit 7''')")
+        } catch {
+            control = "\(error)"
+        }
+        _ = try? await admin.simpleQuery("ROLLBACK")
+        #expect(control.contains("program \"exit 7\" failed"), "the program runs inside READ ONLY: \(control)")
+        for sql in ["SELECT ccinnpsql_mcp_exec(';COPY (SELECT 1) TO PROGRAM ''sleep 2''')",
+                    "SELECT ccinnpsql_mcp_exec(' ; ; copy (select 1) to program ''sleep 2''')",
+                    "SELECT ccinnpsql_mcp_exec($x$;COPY (SELECT 1) TO PROGRAM 'sleep 2'$x$)",
+                    "SELECT ccinnpsql_mcp_exec(E';\\nCOPY (SELECT 1) TO PROGRAM \\'sleep 2\\'')"] {
+            let started = ContinuousClock.now
+            let refused = await tools.call(name: "run_query", arguments: ["sql": .string(sql)])
+            #expect(refused.isError, "accepted: \(sql)")
+            #expect(ContinuousClock.now - started < .seconds(1.5), "the program ran: \(sql)")
         }
         // ...and SQL built at run time, which no lexer can see, leaves nothing behind: the session is reset.
         let builtAtRunTime = await tools.call(name: "run_query", arguments: ["sql": """

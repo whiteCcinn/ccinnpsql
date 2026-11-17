@@ -534,6 +534,10 @@ public struct PostgresMCPTools: MCPToolProvider {
             guard SQLStatementKind.of(sql) == .show else {
                 throw MCPToolError("The PgBouncer admin console only accepts SHOW commands (SHOW POOLS, SHOW STATS, SHOW CLIENTS, …).")
             }
+            // The simple protocol runs every statement of a message: send exactly one.
+            guard ReadOnlySQLGuard.isSingleStatement(sql) else {
+                throw MCPToolError("Only one statement can be run at a time; send statements separately.")
+            }
             return try await client.simpleQuery(sql, database: database, limits: limits, timeout: timeout)
         }
         return try await client.withConnection(database: database) { connection in

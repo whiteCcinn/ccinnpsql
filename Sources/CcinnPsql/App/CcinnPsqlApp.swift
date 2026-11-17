@@ -167,7 +167,7 @@ struct ConnectingView: View {
 ///     CcinnPsql --connect host:port [--user u] [--database db] [--sslmode prefer] [--object schema.name]
 ///               [--section overview|structure|partitions|statistics|ddl|data|grants] [--sql "…"] [--auto-run]
 ///               [--view grid|chart|plan] [--explain] [--operations activity|locks|replication|…] [--notifications]
-///               [--duplicate-window]
+///               [--duplicate-window] [--format]
 ///     … [--appearance light|dark] [--settings mcp] [--snapshot out.png --snapshot-delay 6 --quit-after-snapshot]
 ///
 /// The password for `--connect` comes from the environment (`CCINNPSQL_PASSWORD`), never the command line.
@@ -227,6 +227,11 @@ enum LaunchArguments {
                 }
                 if let sql = value("--sql") {
                     let model = workspace.openSQL(text: sql.replacingOccurrences(of: "\\n", with: "\n"), database: value("--database"))
+                    if has("--format") {
+                        try? await Task.sleep(for: .milliseconds(300)) // let the editor attach so the edit is undoable
+                        model.formatSQL()
+                        for _ in 0..<100 where model.isFormatting { try? await Task.sleep(for: .milliseconds(20)) }
+                    }
                     if has("--explain") {
                         model.explain(analyze: has("--analyze"))
                     } else if has("--auto-run") {
@@ -321,6 +326,8 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @AppStorage("appearance") private var appearance = AppearancePreference.system.rawValue
     @AppStorage("autoLimit") private var autoLimit = 1000
+    @AppStorage("sqlFormatKeywordCase") private var formatKeywordCase = SQLFormatOptions.KeywordCase.upper.rawValue
+    @AppStorage("sqlFormatIndent") private var formatIndent = 2
 
     var body: some View {
         Form {
@@ -330,6 +337,16 @@ struct SettingsView: View {
             Picker("Automatic LIMIT for SELECT", selection: $autoLimit) {
                 Text("None").tag(0)
                 ForEach([100, 500, 1000, 5000, 10_000, 50_000], id: \.self) { Text($0.formatted()).tag($0) }
+            }
+            Picker("Format SQL: keyword case", selection: $formatKeywordCase) {
+                Text("UPPER").tag(SQLFormatOptions.KeywordCase.upper.rawValue)
+                Text("lower").tag(SQLFormatOptions.KeywordCase.lower.rawValue)
+                Text("Unchanged").tag(SQLFormatOptions.KeywordCase.preserve.rawValue)
+            }
+            .help("Applies to keywords only; names, functions, strings and quoted identifiers always keep their text.")
+            Picker("Format SQL: indent", selection: $formatIndent) {
+                Text("2 spaces").tag(2)
+                Text("4 spaces").tag(4)
             }
             LabeledContent("Saved connections") {
                 Button("Show in Finder") {
@@ -375,6 +392,11 @@ struct AppCommands: Commands {
             Button("Disconnect") { session?.disconnect() }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .disabled(session?.workspace == nil)
+        }
+        CommandGroup(after: .textEditing) {
+            Button("Format SQL") { session?.workspace?.selectedSQL?.formatSQL() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(session?.workspace?.selectedSQL == nil)
         }
         CommandMenu("Server") {
             Button("Refresh Schemas") { session?.workspace?.refreshAll() }

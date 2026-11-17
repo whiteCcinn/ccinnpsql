@@ -85,6 +85,21 @@ struct PoolerIntegrationTests {
         let stats = try await client.poolerReport("STATS")
         #expect(stats.lastRowSet?.hasRowSet == true)
         await #expect(throws: PostgresError.self) { _ = try await client.poolerReport("SHUTDOWN") }
+
+        // Read-only MCP on the console sends one SHOW over the simple protocol, never a message with more statements.
+        let profile = ConnectionProfile(name: "PgBouncer console", host: "127.0.0.1", port: 15430, username: "ccinn", database: "pgbouncer",
+                                        mcpAccess: .readOnly)
+        let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
+                                     registry: MCPClientRegistry { _ in client }, audit: nil)
+        let show = await tools.call(name: "run_query", arguments: ["sql": "SHOW POOLS"])
+        #expect(!show.isError, "\(show.payload)")
+        for sql in ["SHOW POOLS begin atomic; PAUSE ccinn; end", "SHOW POOLS; PAUSE ccinn"] {
+            let refused = await tools.call(name: "run_query", arguments: ["sql": .string(sql)])
+            #expect(refused.isError, "accepted: \(sql)")
+            #expect(refused.payload.stringValue?.contains("invalid command") != true, "reached PgBouncer: \(sql)")
+        }
+        let paused = try await client.poolerReport("DATABASES").records.filter { $0.text("name") == "ccinn" }.compactMap { $0.text("paused") }
+        #expect(paused == ["0"], "a database was paused: \(paused)")
     }
 
     @Test func pgpool() async throws {

@@ -15,8 +15,8 @@ public struct SQLStatement: Sendable, Equatable {
 public enum SQLStatementSplitter {
     /// Splits on semicolons outside strings, dollar quotes, quoted identifiers and comments. Statements made only
     /// of comments/whitespace are dropped.
-    public static func split(_ script: String) -> [SQLStatement] {
-        let lexer = SQLLexer(script)
+    public static func split(_ script: String, syntax: SQLLexer.Syntax = .editor) -> [SQLStatement] {
+        let lexer = SQLLexer(script, syntax: syntax)
         return split(lexer: lexer, tokens: lexer.tokens())
     }
 
@@ -28,6 +28,13 @@ public enum SQLStatementSplitter {
         var depth = 0
         var atomicDepth = 0
         var previousWord = ""
+        // The first words of the statement: `BEGIN ATOMIC` opens a body only in CREATE [OR REPLACE] FUNCTION / PROCEDURE.
+        var leadingWords: [String] = []
+        var isRoutine: Bool {
+            let words = leadingWords.first == "CREATE" ? Array(leadingWords.dropFirst()) : []
+            let kind = words.starts(with: ["OR", "REPLACE"]) ? words.dropFirst(2).first : words.first
+            return kind == "FUNCTION" || kind == "PROCEDURE"
+        }
         func flush() {
             if let start = firstSignificant {
                 let range = start..<lastSignificantEnd
@@ -36,6 +43,7 @@ public enum SQLStatementSplitter {
             firstSignificant = nil
             depth = 0
             atomicDepth = 0
+            leadingWords.removeAll()
         }
         for token in tokens {
             if token.kind == .comment {
@@ -55,7 +63,8 @@ public enum SQLStatementSplitter {
                 }
             }
             let word = lexer.word(of: token)
-            if word == "ATOMIC", previousWord == "BEGIN" { atomicDepth += 1 }
+            if leadingWords.count < 4, token.kind == .keyword || token.kind == .identifier { leadingWords.append(word) }
+            if word == "ATOMIC", previousWord == "BEGIN", isRoutine { atomicDepth += 1 }
             if word == "END", atomicDepth > 0 { atomicDepth -= 1 }
             previousWord = word
             if firstSignificant == nil { firstSignificant = token.range.lowerBound }
@@ -84,8 +93,8 @@ struct StatementWords {
     let tokens: [SQLToken]
     let words: [String]
 
-    init(_ statement: String) {
-        let lexer = SQLLexer(statement)
+    init(_ statement: String, syntax: SQLLexer.Syntax = .editor) {
+        let lexer = SQLLexer(statement, syntax: syntax)
         let tokens = lexer.tokens().filter { $0.kind != .comment }
         self.lexer = lexer
         self.tokens = tokens

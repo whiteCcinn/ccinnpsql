@@ -60,22 +60,40 @@ public enum ReadOnlySQLGuard {
         forbiddenFunctions.contains(name) || forbiddenPrefixes.contains { name.hasPrefix($0) }
     }
 
+    /// The readings a statement must pass: the editor's (keywords under any case mapping, a word after a number is its own
+    /// token) and each server version's. Where they differ (`1_0e'…'` holds an E'…' string to one and trailing junk and a
+    /// '…' string to another), the statement is allowed only if every reading allows it.
+    static let readings: [SQLLexer.Syntax] = [.editor] + SQLLexer.Syntax.servers
+
+    /// Exactly one statement with no `;` anywhere outside strings and comments: the only text read-only access sends over
+    /// the simple query protocol (which runs every statement of a message).
+    public static func isSingleStatement(_ sql: String) -> Bool {
+        let tokens = SQLLexer(sql).tokens().filter { $0.kind != .comment }
+        let lexer = SQLLexer(sql)
+        return !tokens.isEmpty && !tokens.contains { $0.kind == .punctuation && lexer.units[$0.range].elementsEqual([0x3B]) }
+    }
+
     /// `nil` when allowed; otherwise the reason it is rejected.
     public static func check(_ sql: String) -> String? {
-        check(sql, depth: 0)
+        for syntax in readings {
+            if let reason = check(sql, depth: 0, syntax: syntax) { return reason }
+        }
+        return nil
     }
 
     /// `depth`: how many string literals deep `sql` was found (0 for the statement itself).
-    private static func check(_ sql: String, depth: Int) -> String? {
-        let statements = SQLStatementSplitter.split(sql)
+    private static func check(_ sql: String, depth: Int, syntax: SQLLexer.Syntax) -> String? {
+        let statements = SQLStatementSplitter.split(sql, syntax: syntax)
         guard let statement = statements.first else { return "The statement is empty." }
         guard statements.count == 1 else { return "Only one statement can be run at a time; send statements separately." }
-        let analysis = StatementWords(statement.text)
+        if let reason = ambiguity(in: statement.text, syntax: syntax) { return reason }
+        let analysis = StatementWords(statement.text, syntax: syntax)
+        if let reason = programOrAtomicBody(in: analysis) { return reason }
         let first = analysis.firstWordIndex()
         guard first < analysis.words.count else { return "The statement is empty." }
         switch analysis.words[first] {
         case "SELECT", "WITH", "VALUES", "TABLE":
-            return checkQuery(analysis, from: first, depth: depth)
+            return checkQuery(analysis, from: first, depth: depth, syntax: syntax)
         case "SHOW":
             return nil
         case "EXPLAIN":
@@ -84,13 +102,63 @@ public enum ReadOnlySQLGuard {
             guard bodyFirst < analysis.words.count, ["SELECT", "WITH", "VALUES", "TABLE"].contains(analysis.words[bodyFirst]) else {
                 return "Only EXPLAIN of a SELECT query is allowed in read-only mode."
             }
-            return checkQuery(analysis, from: bodyFirst, depth: depth)
+            return checkQuery(analysis, from: bodyFirst, depth: depth, syntax: syntax)
         default:
             return rejection(analysis.words[first])
         }
     }
 
-    private static func checkQuery(_ analysis: StatementWords, from start: Int, depth: Int) -> String? {
+    /// Text that another reading could split into more statements than the lexer sees: where PostgreSQL versions, settings
+    /// or other tools may read it differently, the guard refuses rather than pick one reading.
+    /// - a `;` inside the statement (the splitter keeps those of `BEGIN ATOMIC` bodies and parentheses together);
+    /// - a nested block comment (one comment to PostgreSQL, code after the first `*/` to a reader that does not nest);
+    /// - a backslash before a quote in a standard string (`'a\''` ends early while standard_conforming_strings is off).
+    static func ambiguity(in statement: String, syntax: SQLLexer.Syntax) -> String? {
+        let lexer = SQLLexer(statement, syntax: syntax)
+        for token in lexer.tokens() {
+            let units = lexer.units[token.range]
+            switch token.kind {
+            case .punctuation where units.elementsEqual([0x3B]):
+                return "Only one statement can be run at a time; send statements separately."
+            case .comment where units.starts(with: [0x2F, 0x2A]) && units.dropFirst(2).indices.contains(where: { index in
+                index + 1 < token.range.upperBound && lexer.units[index] == 0x2F && lexer.units[index + 1] == 0x2A
+            }):
+                return "Nested block comments are not allowed in read-only mode."
+            case .string where isStandardString(units) && units.indices.dropFirst().contains(where: { index in
+                lexer.units[index] == 0x27 && lexer.units[index - 1] == 0x5C
+            }):
+                return "A backslash before a quote in a '…' string reads differently when standard_conforming_strings is off; "
+                    + "use E'…' or a doubled quote."
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    /// `TO PROGRAM` / `FROM PROGRAM` (COPY running a shell command, which a READ ONLY transaction does not stop), in any
+    /// case, anywhere (string literals read as SQL included); and `BEGIN ATOMIC`, which is never part of a read.
+    static func programOrAtomicBody(in analysis: StatementWords) -> String? {
+        for index in analysis.tokens.indices where analysis.isWord(index, "PROGRAM") || analysis.isWord(index, "ATOMIC") {
+            let previous = index - 1
+            if analysis.words[index] == "PROGRAM", analysis.isWord(previous, "TO") || analysis.isWord(previous, "FROM") || analysis.isWord(previous, "COPY") {
+                return "COPY … TO / FROM PROGRAM runs a server-side command; it is not allowed in read-only mode."
+            }
+            if analysis.words[index] == "ATOMIC", analysis.isWord(previous, "BEGIN") {
+                return "BEGIN ATOMIC is not allowed in read-only mode."
+            }
+        }
+        return nil
+    }
+
+    /// `'…'` or `N'…'`: the strings whose backslashes depend on standard_conforming_strings.
+    private static func isStandardString(_ units: ArraySlice<UInt16>) -> Bool {
+        guard let first = units.first else { return false }
+        if first == 0x27 { return true }
+        return (first == 0x4E || first == 0x6E) && units.dropFirst().first == 0x27
+    }
+
+    private static func checkQuery(_ analysis: StatementWords, from start: Int, depth: Int, syntax: SQLLexer.Syntax) -> String? {
         guard SQLStatementKind.classify(analysis, from: start) == .query else {
             return "The statement writes data (a data-modifying WITH or SELECT … INTO); it is not allowed in read-only mode."
         }
@@ -110,7 +178,7 @@ public enum ReadOnlySQLGuard {
                 return "Row-locking clauses (FOR UPDATE / FOR SHARE) are not allowed in read-only mode."
             }
         }
-        return checkLiterals(in: analysis, depth: depth + 1)
+        return checkLiterals(in: analysis, depth: depth + 1, syntax: syntax)
     }
 
     /// Calls to forbidden functions (also schema-qualified or quoted), Unicode-escaped identifiers and `UESCAPE`,
@@ -139,7 +207,7 @@ public enum ReadOnlySQLGuard {
     /// does `EXECUTE`); a denylist always misses one. So the content of every string literal (adjacent literals joined,
     /// escapes decoded) is read as SQL again: content that starts with a statement verb must pass the whole guard, and
     /// no content may call a forbidden function. Conservative by design: text that merely looks like a write is refused.
-    private static func checkLiterals(in analysis: StatementWords, depth: Int) -> String? {
+    private static func checkLiterals(in analysis: StatementWords, depth: Int, syntax: SQLLexer.Syntax) -> String? {
         var index = 0
         while index < analysis.tokens.count {
             guard analysis.tokens[index].kind == .string else {
@@ -155,23 +223,30 @@ public enum ReadOnlySQLGuard {
                 }
                 index += 1
             }
-            if isText, let reason = checkEmbedded(content, depth: depth) { return reason }
+            if isText, let reason = checkEmbedded(content, depth: depth, syntax: syntax) { return reason }
         }
         return nil
     }
 
-    private static func checkEmbedded(_ text: String, depth: Int) -> String? {
-        let inner = StatementWords(text)
+    private static func checkEmbedded(_ text: String, depth: Int, syntax: SQLLexer.Syntax) -> String? {
+        let inner = StatementWords(text, syntax: syntax)
         guard !inner.tokens.isEmpty else { return nil }
+        if let reason = programOrAtomicBody(in: inner) { return "A string literal contains SQL that is not allowed in read-only mode: \(reason)" }
         guard depth <= maxLiteralDepth else { return "SQL is nested too deeply in string literals for a read-only query." }
-        let first = inner.firstWordIndex()
-        if first < inner.tokens.count, inner.tokens[first].kind == .keyword || inner.tokens[first].kind == .identifier,
-           statementVerbs.contains(inner.words[first]) {
-            guard let reason = check(text, depth: depth) else { return nil }
+        // Content of which any statement starts with a verb (after any `(`, and whatever precedes it: `;COPY …`) is SQL
+        // (`$$x; DROP TABLE t$$` holds a second statement): it must pass the whole guard, which takes one statement only.
+        let startsWithVerb = { (statement: SQLStatement) -> Bool in
+            let words = StatementWords(statement.text, syntax: syntax)
+            let first = words.firstWordIndex()
+            return first < words.tokens.count && (words.tokens[first].kind == .keyword || words.tokens[first].kind == .identifier)
+                && statementVerbs.contains(words.words[first])
+        }
+        if SQLStatementSplitter.split(text, syntax: syntax).contains(where: startsWithVerb) {
+            guard let reason = check(text, depth: depth, syntax: syntax) else { return nil }
             return "A string literal contains SQL that is not allowed in read-only mode: \(reason)"
         }
         if let reason = forbiddenCall(in: inner) { return "A string literal contains SQL that is not allowed in read-only mode: \(reason)" }
-        return checkLiterals(in: inner, depth: depth + 1)
+        return checkLiterals(in: inner, depth: depth + 1, syntax: syntax)
     }
 
     /// The text of a string literal as PostgreSQL reads it (with `standard_conforming_strings = on`, which the

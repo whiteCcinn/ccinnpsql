@@ -15,7 +15,7 @@ struct SQLWorkbenchView: View {
                     SQLEditor(text: $model.text, selection: $model.selection, diagnostics: model.diagnostics,
                               completionProvider: { [model] text, cursor in await model.completions(text: text, cursor: cursor) },
                               onEdit: { [model] edits in model.editorDidEdit(edits) },
-                              focusOnAppear: true)
+                              focusOnAppear: true, controller: model.editorController)
                     DiagnosticsBar(model: model)
                 }
                 .frame(minHeight: 110, idealHeight: 260)
@@ -80,6 +80,14 @@ private struct WorkbenchToolbar: View {
             .fixedSize()
             .disabled(model.isRunning || model.isConsole)
             .help("Show the query plan (⌘E); ⇧⌘E runs EXPLAIN ANALYZE, BUFFERS")
+
+            Button {
+                model.formatSQL()
+            } label: {
+                Label("Format", systemImage: "text.alignleft")
+            }
+            .disabled(model.isFormatting)
+            .help("Format the selection, or the whole script when nothing is selected (⌥⌘L)")
 
             if model.isRunning {
                 Button(role: .destructive) {
@@ -366,6 +374,7 @@ private struct ResultPlaceholder: View {
                 hint("⌘↩", "Run selection or current statement")
                 hint("⇧⌘↩", "Run all statements")
                 hint("⌘E", "Explain the current statement (⇧⌘E: ANALYZE)")
+                hint("⌥⌘L", "Format the selection or the whole script")
                 hint("⌃Space", "Suggest tables, columns and functions")
                 hint("⌘/", "Toggle line comments")
             }

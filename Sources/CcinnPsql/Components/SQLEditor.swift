@@ -4,6 +4,35 @@ import SwiftUI
 
 typealias CompletionProvider = @MainActor (_ text: String, _ cursor: Int) async -> CompletionResult
 
+/// Lets a model change the editor text the way typing does: one undoable edit that the editor's edit tracking (and so
+/// the diagnostics) sees. Works on the text the user sees, which is ahead of the model's while an input method composes.
+@MainActor
+final class SQLEditorController {
+    weak var textView: SQLTextView?
+
+    enum ReplaceOutcome: Equatable {
+        case replaced
+        /// The editor's text is not the expected text, or an input method is composing: nothing changed.
+        case refused
+        /// No editor is attached (a tab not shown yet).
+        case detached
+    }
+
+    /// The editor's text and selection, or `nil` when no editor is attached or an input method is composing (the marked
+    /// text is not part of the document yet).
+    func snapshot() -> (text: String, selection: NSRange)? {
+        guard let textView, !textView.hasMarkedText() else { return nil }
+        return (textView.string, textView.selectedRange())
+    }
+
+    /// Replaces `range` and selects `selection`, only if the editor still shows exactly `expectedText`.
+    func replace(_ range: NSRange, in expectedText: String, with replacement: String, actionName: String,
+                 selecting selection: NSRange) -> ReplaceOutcome {
+        guard let textView else { return .detached }
+        return textView.replace(range, in: expectedText, with: replacement, actionName: actionName, selecting: selection) ? .replaced : .refused
+    }
+}
+
 /// SQL editor on NSTextView: lexer-driven highlighting, line numbers, current-statement highlight,
 /// diagnostics (underlines and inline messages), bracket/quote pairing, comment toggling and
 /// context-aware completion.
@@ -20,6 +49,7 @@ struct SQLEditor: NSViewRepresentable {
     /// Edits made by the user, reported before `text` is updated (see `SQLTabModel.editorDidEdit`).
     var onEdit: (@MainActor ([SQLTextEdit]) -> Void)?
     var focusOnAppear = false
+    var controller: SQLEditorController?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -70,6 +100,7 @@ struct SQLEditor: NSViewRepresentable {
         }
 
         context.coordinator.textView = textView
+        controller?.textView = textView
         textView.string = text
         textView.textStorage?.delegate = context.coordinator
         context.coordinator.diagnostics = diagnostics
@@ -542,6 +573,33 @@ final class SQLTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    /// Replaces `range` with `replacement` as a single undo step (⌘Z restores the original), then selects `selection`.
+    /// Goes through `shouldChangeText` / `didChangeText` like typing, so edit tracking sees it. Refuses (`false`) while an
+    /// input method composes and when the text is no longer `expectedText` (the replacement was computed from it).
+    func replace(_ range: NSRange, in expectedText: String, with replacement: String, actionName: String, selecting selection: NSRange) -> Bool {
+        guard isEditable, !hasMarkedText(), let textStorage else { return false }
+        let current = string as NSString
+        let length = current.length
+        guard length == (expectedText as NSString).length, current.isEqual(to: expectedText),
+              range.location >= 0, range.length >= 0, range.location <= length, range.length <= length - range.location else { return false }
+        breakUndoCoalescing()
+        undoManager?.beginUndoGrouping()
+        defer {
+            undoManager?.endUndoGrouping()
+            breakUndoCoalescing()
+        }
+        guard shouldChangeText(in: range, replacementString: replacement) else { return false }
+        textStorage.replaceCharacters(in: range, with: NSAttributedString(string: replacement, attributes: typingAttributes))
+        didChangeText()
+        undoManager?.setActionName(actionName)
+        let updated = (string as NSString).length
+        let location = min(max(0, selection.location), updated)
+        let clamped = NSRange(location: location, length: min(max(0, selection.length), updated - location))
+        setSelectedRange(clamped)
+        scrollRangeToVisible(clamped)
+        return true
     }
 
     override func complete(_ sender: Any?) {

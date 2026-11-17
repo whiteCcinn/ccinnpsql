@@ -122,7 +122,7 @@ final class ChartState {
 /// notices, transaction state, history and export.
 @MainActor
 @Observable
-final class SQLTabModel {
+final class SQLTabModel: SQLFormatHost {
     let title: String
     /// Edits made in the editor arrive through `editorDidEdit` first; any other assignment (History → Open) replaces the
     /// text, which makes every server diagnostic stale.
@@ -184,7 +184,36 @@ final class SQLTabModel {
         set { UserDefaults.standard.set(newValue, forKey: "autoLimit") }
     }
 
+    // MARK: Formatting
+
+    /// The editor of this tab, for edits that must be undoable (formatting).
+    let editorController: SQLEditorController
+    /// Format SQL for this tab's editor.
+    let formatRunner: SQLFormatRunner
+    var isFormatting: Bool { formatRunner.isRunning }
+
+    /// Settings ▸ General ▸ SQL formatting.
+    static var formatOptions: SQLFormatOptions {
+        let defaults = UserDefaults.standard
+        let keywordCase = defaults.string(forKey: "sqlFormatKeywordCase").flatMap(SQLFormatOptions.KeywordCase.init(rawValue:)) ?? .upper
+        let indent = defaults.object(forKey: "sqlFormatIndent") as? Int ?? 2
+        return SQLFormatOptions(keywordCase: keywordCase, indentWidth: indent)
+    }
+
+    /// Formats the selection (widened to whole tokens), or the whole script when nothing is selected, as one undoable edit
+    /// (see `SQLFormatRunner`); the outcome shows in the status toast.
+    func formatSQL() {
+        formatRunner.format(options: Self.formatOptions)
+    }
+
+    func formatDidFinish(_ outcome: SQLFormatRunner.Outcome) {
+        if let status = outcome.status { workspace.showToast(status.message, isError: status.isError) }
+    }
+
     init(title: String, text: String, database: String, workspace: WorkspaceModel) {
+        let editorController = SQLEditorController()
+        self.editorController = editorController
+        formatRunner = SQLFormatRunner(editor: editorController)
         self.title = title
         self.text = text
         lineIndex = SQLLineIndex(text)
@@ -192,6 +221,7 @@ final class SQLTabModel {
         self.workspace = workspace
         session = workspace.client.openSession(database: database)
         selection = NSRange(location: (text as NSString).length, length: 0)
+        formatRunner.host = self
         scheduleLint(after: .zero)
     }
 
@@ -224,6 +254,7 @@ final class SQLTabModel {
     func editorDidEdit(_ edits: [SQLTextEdit]) {
         editorEditPending = true
         guard !edits.isEmpty else { return }
+        formatRunner.cancel(reportingChange: true) // the result would no longer apply
         for edit in edits where !lineIndexIsStale {
             if !lineIndex.apply(edit) { lineIndexIsStale = true }
         }
@@ -253,6 +284,7 @@ final class SQLTabModel {
     }
 
     private func textWasReplaced() {
+        formatRunner.cancel(reportingChange: true)
         rebuildLineIndex()
         if !serverDiagnostics.isEmpty { serverDiagnostics = [] }
         if !localDiagnostics.isEmpty { localDiagnostics = [] }
@@ -675,6 +707,7 @@ final class SQLTabModel {
         runTask?.cancel()
         exportTask?.cancel()
         lintTask?.cancel()
+        formatRunner.cancel(reportingChange: false)
         if let pendingConfirmation { pendingConfirmation.continuation.resume(returning: false) }
         pendingConfirmation = nil
         let session = session
