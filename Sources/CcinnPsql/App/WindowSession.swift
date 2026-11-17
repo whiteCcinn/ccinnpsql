@@ -15,6 +15,10 @@ enum ConnectionOpener {
 @MainActor
 @Observable
 final class WindowSession {
+    /// Opens a client (`ConnectionOpener.open`; tests pass their own).
+    typealias Opener = @Sendable (_ profile: ConnectionProfile, _ password: String, _ sshSecret: String?,
+                                  _ progress: @escaping @Sendable (String) -> Void) async throws -> PostgresClient
+
     enum Phase {
         case connections
         case connecting(name: String, status: String)
@@ -34,6 +38,13 @@ final class WindowSession {
         }
     }
     private var connectTask: Task<Void, Never>?
+    /// Increases with every connect, cancel and disconnect: reports and results of an older connect are ignored.
+    @ObservationIgnored private var connectGeneration: UInt64 = 0
+    @ObservationIgnored private let opener: Opener
+
+    init(opener: @escaping Opener = { try await ConnectionOpener.open(profile: $0, password: $1, sshSecret: $2, progress: $3) }) {
+        self.opener = opener
+    }
 
     var workspace: WorkspaceModel? {
         if case let .connected(model) = phase { return model }
@@ -46,14 +57,20 @@ final class WindowSession {
         let name = profile.displayName
         let password = overridePassword ?? store.password(for: profile) ?? ""
         let sshSecret = profile.ssh.map { $0.authentication == .agent } == false ? store.sshSecret(for: profile) : nil
+        // A connect still in flight (double-click, a second Connect) would otherwise finish later and leave a live
+        // client and tunnel behind, and its progress reports would overwrite this connect's status.
+        connectTask?.cancel()
+        connectGeneration &+= 1
+        let generation = connectGeneration
         phase = .connecting(name: name, status: "Connecting…")
-        let report: @Sendable (String) -> Void = { status in
-            Task { @MainActor in self.updateStatus(name: name, status: status) }
+        let report: @Sendable (String) -> Void = { [weak self] status in
+            Task { @MainActor in self?.updateStatus(generation: generation, name: name, status: status) }
         }
+        let opener = opener
         connectTask = Task {
             do {
-                let client = try await ConnectionOpener.open(profile: profile, password: password, sshSecret: sshSecret, progress: report)
-                if Task.isCancelled {
+                let client = try await opener(profile, password, sshSecret, report)
+                if Task.isCancelled || generation != self.connectGeneration {
                     await client.close()
                     return
                 }
@@ -64,7 +81,7 @@ final class WindowSession {
                 then?(workspace)
             } catch {
                 DebugLog.write("connect failed: \(error) cancelled=\(Task.isCancelled)")
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == self.connectGeneration else { return }
                 self.connectError = describe(error)
                 self.phase = .connections
             }
@@ -97,14 +114,15 @@ final class WindowSession {
     /// Connections handed to windows this process opens (see `WindowHandoff`).
     private static let handoff = WindowHandoff<WindowConnection>()
 
-    private func updateStatus(name: String, status: String) {
-        guard case .connecting = phase else { return }
+    private func updateStatus(generation: UInt64, name: String, status: String) {
+        guard generation == connectGeneration, case .connecting = phase else { return }
         phase = .connecting(name: name, status: status)
     }
 
     func cancelConnecting() {
         connectTask?.cancel()
         connectTask = nil
+        connectGeneration &+= 1
         phase = .connections
     }
 
@@ -113,6 +131,7 @@ final class WindowSession {
         // A connect still in flight would otherwise finish later and leave a live client/tunnel behind.
         connectTask?.cancel()
         connectTask = nil
+        connectGeneration &+= 1
         workspace?.shutdown()
         phase = .connections
     }
