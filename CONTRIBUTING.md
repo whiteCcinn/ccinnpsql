@@ -46,7 +46,7 @@ CCINNPSQL_PASSWORD=ccinn dist/CcinnPsql.app/Contents/MacOS/CcinnPsql \
 Passwords never go on the command line; set `CCINNPSQL_PASSWORD` in the environment. Other launch arguments:
 `--sql "…" --auto-run [--view chart|plan]`, `--sql "…" --explain [--analyze]`, `--operations activity|locks|replication|…`,
 `--notifications`, `--profile <saved name>`, `--duplicate-window` (opens a second window with the same connection once
-connected), `--appearance light|dark` and
+connected), `--format` (formats the `--sql` text in its editor), `--appearance light|dark` and
 `--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot [--snapshot-window <title>]` (renders the frontmost
 window, or the one with that title, off-screen without stealing focus or needing screen-recording permission). `CCINNPSQL_PROFILE_DIR` points the app and the MCP server at another profile folder.
 
@@ -63,7 +63,7 @@ Dependencies only point downwards; lower modules must not import higher ones.
 
 ## Guidelines
 
-- **Test first.** Add or update tests with every behaviour change. Protocol and concurrency logic is covered with the in-memory fake server in `Tests/PostgresKitTests/FakePostgresServer.swift`; PostgreSQL behaviour with the integration suites.
+- **Test first.** Add or update tests with every behaviour change. Protocol and concurrency logic is covered with the in-memory fake server in `Tests/PostgresKitTests/FakePostgresServer.swift`; PostgreSQL behaviour with the integration suites; AppKit editor behaviour (text storage edits, input methods) in `Tests/CcinnPsqlAppTests`.
 - **Version-aware SQL.** Catalog differences between 9.6 and 18 live in the `CatalogSQL`, `InsightSQL` and `OperationsSQL` builders; read results by column name (`Record.text("name")`), never by position. Fall back only on server errors, never on timeouts or cancellation.
 - **Never crash on input.** No force unwraps/casts, unchecked indexing or trapping integer conversions on data that comes from a server, a file or the user. Parsers are fuzzed; keep it that way.
 - **Concurrency.** Code must compile in Swift 6 strict-concurrency mode. Keep shared mutable state inside actors or behind small, well-scoped locks; do not block the main actor with I/O, sorting or chart preparation.
