@@ -169,6 +169,15 @@ public final class SSHTunnel: Sendable {
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=\(max(1, connectTimeout))",
             "-o", "NumberOfPasswordPrompts=1",
+            // No connection sharing, whatever ~/.ssh/config says (command-line options win):
+            // - `ControlMaster=no`: with `ControlMaster auto` the tunnel would become the shared master, and closing its
+            //   window would cut the user's other sessions multiplexed over it;
+            // - `ControlPath=none`: with only the above, ssh still joins an existing master as a client. That master then
+            //   owns the forwarded port, which outlives this process (it keeps forwarding after the tunnel is closed, and
+            //   each connect adds one), and the profile's authentication is never used.
+            // Both apply to this ssh only; the user's own sessions keep their master.
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=none",
             "-L", "127.0.0.1:\(localPort):\(remoteHost):\(remote.port)",
             "-p", String(configuration.port),
         ]
