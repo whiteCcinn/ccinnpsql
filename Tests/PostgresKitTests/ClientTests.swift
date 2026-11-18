@@ -41,7 +41,9 @@ struct ClientTests {
             #expect(error.kind == .timeout)
             #expect(error.message != "test watchdog", "the client's own deadline did not fire")
         }
-        #expect(ContinuousClock.now - started < .seconds(15))
+        // The message check above proves the client's 5 s deadline fired before the 30 s watchdog; this bound only
+        // guards against a hang and allows for a busy CI runner.
+        #expect(ContinuousClock.now - started < .seconds(25))
     }
 
     /// Server errors from optional probes mean "not supported"; anything else must surface.

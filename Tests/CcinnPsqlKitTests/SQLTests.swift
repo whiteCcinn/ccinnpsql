@@ -192,7 +192,12 @@ struct LexerTests {
         }
     }
 
-    @Test func fuzzedInputNeverTraps() {
+    @Test func fuzzedInputNeverTraps() async {
+        // Seconds of work in debug builds: on a thread of its own, so the rest of the suite keeps its threads.
+        await onDedicatedThread { Self.fuzzEveryEntryPoint() }
+    }
+
+    private static func fuzzEveryEntryPoint() {
         var generator = SystemRandomNumberGenerator()
         let alphabet = Array("SELECTINSERTWITH'\"$;()/*-\\e&U0123456789 \n.,:@#".unicodeScalars) + ["é", "𝔸"]
         for _ in 0..<3_000 {

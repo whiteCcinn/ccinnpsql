@@ -710,7 +710,7 @@ struct SQLFormatterTests {
     }
 
     /// Linear time on input built to defeat look-aheads: nesting, unclosed CASE, statements that never end.
-    @Test func adversarialInputFormatsInLinearTime() throws {
+    @Test func adversarialInputFormatsInLinearTime() async throws {
         let count = 50_000
         let inputs = [
             String(repeating: "select (", count: count),
@@ -730,18 +730,26 @@ struct SQLFormatterTests {
         // a busy machine: linear work costs a small multiple of it, quadratic work (`explain` × 50,000 took 72 s, `outer`
         // runs 5.5 s per 384 KB in release) tens of times more.
         let ordinary = String(repeating: "select a, b from t where c = 1 and d in (1, 2);\n", count: 6_000)
-        let perUnit = { (text: String) -> Double in
-            let started = ContinuousClock.now
-            _ = try? SQLFormatter.formatted(text)
-            let elapsed = ContinuousClock.now - started
-            return (Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18) / Double(text.utf16.count)
+        struct Measured: Sendable { let label: String; let error: SQLFormatError?; let cost: Double }
+        // Seconds of formatting: measured on a thread of its own, so the rest of the suite keeps its threads.
+        let (baseline, measured) = await onDedicatedThread { () -> (Double, [Measured]) in
+            let perUnit = { (text: String) -> Double in
+                let started = ContinuousClock.now
+                _ = try? SQLFormatter.formatted(text)
+                let elapsed = ContinuousClock.now - started
+                return (Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18) / Double(text.utf16.count)
+            }
+            let baseline = min(perUnit(ordinary), perUnit(ordinary))
+            let measured = inputs.map { input -> Measured in
+                let outcome = Result { () throws(SQLFormatError) in try SQLFormatter.formatted(input) }
+                let error: SQLFormatError? = if case let .failure(error) = outcome { error } else { nil }
+                return Measured(label: String(input.prefix(24)), error: error, cost: perUnit(input))
+            }
+            return (baseline, measured)
         }
-        let baseline = min(perUnit(ordinary), perUnit(ordinary))
-        for input in inputs {
-            let outcome = Result { () throws(SQLFormatError) in try SQLFormatter.formatted(input) }
-            if case let .failure(error) = outcome { #expect(error == .tooComplex) }
-            let cost = perUnit(input)
-            #expect(cost < 8 * baseline + 1e-6, "\(input.prefix(24).debugDescription)…: \(cost / baseline)× ordinary SQL per character")
+        for result in measured {
+            if let error = result.error { #expect(error == .tooComplex) }
+            #expect(result.cost < 8 * baseline + 1e-6, "\(result.label.debugDescription)…: \(result.cost / baseline)× ordinary SQL per character")
         }
     }
 

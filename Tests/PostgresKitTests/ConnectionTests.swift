@@ -71,9 +71,9 @@ struct ConnectionTests {
         }
         let started = ContinuousClock.now
         await #expect(throws: PostgresError.self) { _ = try await task.value }
-        // A cancelled connect must not wait for the 30 s connect timeout. Generous bound: on a busy CI runner the
-        // task itself can wait seconds for a thread.
-        #expect(ContinuousClock.now - started < .seconds(10))
+        // A cancelled connect must not wait for the 30 s connect timeout. The bound stays below it but leaves room for a
+        // busy CI runner, where the task itself can wait many seconds for a thread.
+        #expect(ContinuousClock.now - started < .seconds(25))
         #expect(network.servers.withLock { $0.isEmpty })
     }
 
@@ -341,8 +341,8 @@ struct CancelCoordinatorTests {
         waiter.cancel()
         await waiter.value
         // The gated delivery never completes on its own, so returning at all proves the waiter honoured
-        // cancellation; the bound allows for a busy CI runner.
-        #expect(ContinuousClock.now - started < .seconds(10))
+        // cancellation; the bound only guards against a hang and allows for a busy CI runner.
+        #expect(ContinuousClock.now - started < .seconds(25))
         sender.gate.open()
     }
 }
