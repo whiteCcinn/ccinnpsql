@@ -25,14 +25,18 @@ public struct CompletionResult: Sendable {
     public let missingColumns: [TableKey]
     /// Schemas whose object lists are needed but not loaded yet.
     public let missingSchemas: [String]
+    /// The cursor is where a relation or schema name must follow (`FROM `, `JOIN `, `TRUNCATE `, `SET search_path TO `, …),
+    /// so the editor may offer the list before anything is typed.
+    public let expectsObjectName: Bool
 
     public init(replacementRange: Range<Int>, prefix: String, items: [CompletionItem], missingColumns: [TableKey] = [],
-                missingSchemas: [String] = []) {
+                missingSchemas: [String] = [], expectsObjectName: Bool = false) {
         self.replacementRange = replacementRange
         self.prefix = prefix
         self.items = items
         self.missingColumns = missingColumns
         self.missingSchemas = missingSchemas
+        self.expectsObjectName = expectsObjectName
     }
 
     public var needsMoreSchema: Bool { !missingColumns.isEmpty || !missingSchemas.isEmpty }
@@ -54,6 +58,14 @@ public enum CompletionEngine {
         case schema
         case typeName
         case expression
+
+        /// Only a relation or schema name can follow, so the list is worth offering before anything is typed.
+        var expectsObjectName: Bool {
+            switch self {
+            case .tableName, .schema: true
+            case .statementStart, .showTarget, .afterTableReference, .typeName, .expression: false
+            }
+        }
     }
 
     /// A table reference in scope: a base table (schema + name) or a derived table/CTE with known columns.
@@ -101,6 +113,7 @@ public enum CompletionEngine {
         var candidates: [CompletionItem]
         var missing: [TableKey] = []
         var missingSchemas: [String] = []
+        var expectsObjectName = false
         if let last = before.last, isDot(last, lexer) {
             let qualifier = qualifierChain(before: before, lexer: lexer)
             // The clause before `schema.` decides what may follow (only materialized views after REFRESH …, no functions after FROM).
@@ -115,10 +128,11 @@ public enum CompletionEngine {
             if case .tableName = context {
                 missingSchemas += schema.searchPath.filter { schema.isSchema($0) && schema.objects(in: $0) == nil }
             }
+            expectsObjectName = context.expectsObjectName
         }
         let ranked = rank(candidates, prefix: prefix, limit: limit)
         return CompletionResult(replacementRange: replacementStart..<cursor, prefix: prefix, items: ranked,
-                                missingColumns: missing, missingSchemas: missingSchemas)
+                                missingColumns: missing, missingSchemas: missingSchemas, expectsObjectName: expectsObjectName)
     }
 
     // MARK: Scope analysis
@@ -308,6 +322,8 @@ public enum CompletionEngine {
             guard depth == 0 else { continue }
             let word = words[index]
             switch word {
+            case "ONLY" where index == 0 || !["FROM", "JOIN", "UPDATE", "TABLE", "TRUNCATE", "EXISTS"].contains(words[index - 1]):
+                break // `FETCH FIRST n ROWS ONLY` ends a query; only `FROM ONLY t`, `ALTER TABLE ONLY t`, … name a table.
             case "FROM", "JOIN", "UPDATE", "INTO", "TABLE", "TRUNCATE", "ONLY", "LATERAL":
                 if distance == 0 || sawComma { return .tableName(materializedViewsOnly: false) }
                 return word == "UPDATE" || word == "INTO" || word == "TABLE" || word == "TRUNCATE" ? .expression : .afterTableReference

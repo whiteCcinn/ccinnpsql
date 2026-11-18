@@ -83,6 +83,32 @@ struct CompletionTests {
         #expect(columns.missingColumns == [TableKey(schema: "other", table: "t")])
     }
 
+    private func result(_ textWithCursor: String) -> CompletionResult {
+        let cursor = (textWithCursor as NSString).range(of: "|").location
+        return CompletionEngine.complete(text: textWithCursor.replacingOccurrences(of: "|", with: ""), cursor: cursor, schema: snapshot)
+    }
+
+    // The editor opens the list on whitespace only where a relation or schema name must follow.
+    @Test func objectNameContextsAreFlagged() {
+        for text in ["SELECT * FROM |", "SELECT * FROM shop.orders o JOIN |", "SELECT * FROM users u, |", "INSERT INTO |", "UPDATE |",
+                     "TRUNCATE |", "TRUNCATE TABLE |", "SELECT * FROM ONLY |", "REFRESH MATERIALIZED VIEW |", "SET search_path TO |",
+                     "SELECT 1;\nSELECT * FROM |"] {
+            #expect(result(text).expectsObjectName, "\(text)")
+        }
+        for text in ["|", "SELECT |", "SELECT * FROM users u |", "SELECT * FROM users WHERE email = |", "SELECT * FROM shop.|",
+                     "SELECT * FROM users ORDER BY email DESC |", "SELECT * FROM users FETCH FIRST 10 ROWS ONLY |",
+                     "SELECT 'FROM |'", "SELECT 1 -- FROM |", "SELECT 1::|"] {
+            #expect(!result(text).expectsObjectName, "\(text)")
+        }
+    }
+
+    // `FETCH FIRST n ROWS ONLY` ends a query; only `ONLY` right after FROM/JOIN/UPDATE/TABLE/TRUNCATE names a table.
+    @Test func onlyAfterFetchIsNotATablePosition() {
+        #expect(!labels("SELECT * FROM users FETCH FIRST 10 ROWS ONLY ").contains("users"))
+        #expect(labels("SELECT * FROM ONLY ").contains("users"))
+        #expect(labels("ALTER TABLE ONLY us").first == "users")
+    }
+
     @Test func noCompletionInsideStringsAndComments() {
         #expect(labels("SELECT 'us").isEmpty)
         #expect(labels("SELECT 1 -- us").isEmpty)
