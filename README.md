@@ -54,7 +54,7 @@ CcinnPsql answers those in one click. It is a native SwiftUI/AppKit app with its
   - **Locks**, **replication** (standbys with write/flush/replay lag, slots with retained WAL and `wal_status`, standby replay delay), **progress** of VACUUM, ANALYZE, CREATE INDEX, CLUSTER, COPY and base backups.
   - **Top statements** from `pg_stat_statements`, **settings** with source and pending restarts, **roles** with attributes and memberships, a server **overview** (connections, cache hit ratio, deadlocks, wraparound age, checkpoints) and **maintenance** candidates (dead tuples, freeze age, unused indexes).
 - **SQL workbench**
-  - PostgreSQL-aware highlighting (dollar quotes, `E''` strings, nested comments, `::` casts) and context-aware completion for schemas, tables, columns through aliases and CTEs, functions and types.
+  - PostgreSQL-aware highlighting (dollar quotes, `E''` strings, nested comments, `::` casts) and context-aware completion for schemas, tables, columns through aliases and CTEs, functions and types. The table list opens as soon as you type a space after `FROM` or `JOIN`.
   - Run the current statement, the selection, every statement in turn, or the whole script as one batch with every result set. Plain `SELECT`s get an automatic `LIMIT`.
   - **Precise, live error markers.**
     - The exact token is underlined: from the server's error position, or the object the error names when there is no position.

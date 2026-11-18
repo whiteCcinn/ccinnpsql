@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-19
+
+### Fixed
+
+- **SQL completion showed suggestions for text you had already typed past.** After the first suggestions appeared, the popup kept showing an earlier list while it moved and resized for the new one: `select * from` could list `SELECT` and `SET`, and a name typed out kept the list of its first letters, so Return could insert a different name. The popup now shows exactly the suggestions for the text at the cursor.
+- **Relations are suggested right after `FROM`.** A space after `FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE`, `TRUNCATE` or `ONLY` opens the tables, views and schemas on the search path; a space after `SCHEMA` or `SET search_path TO` opens the schemas. Return and Tab never open it.
+- `FETCH FIRST n ROWS ONLY` no longer suggests tables: `ONLY` names a table only right after `FROM`, `JOIN`, `UPDATE`, `TABLE` or `TRUNCATE`.
+
 ## [1.3.1] - 2026-11-18
 
 ### Fixed
@@ -97,7 +105,8 @@ First public release.
 - SQL workbench: PostgreSQL highlighting, context-aware completion, run current / selection / all / as script, automatic LIMIT, exact error underline with SQLSTATE, detail and hint, notices, transaction state, cancellation, history, CSV/TSV/JSON/Markdown/INSERT export and COPY export, charts, visual EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON), and a LISTEN/NOTIFY panel.
 - MCP server (`CcinnPsql mcp`) so AI clients such as Claude Code, Codex and Claude Desktop can list connections, inspect servers, schemas, tables, statistics, activity, replication and top statements, and run read-only queries (checked by the app, including SQL inside string literals, executed in a READ ONLY transaction, with the session reset after every call) on connections the user opted in; read & write access is opt-in per connection, and every call is audited with secrets redacted.
 
-[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.1.0...v1.2.0
