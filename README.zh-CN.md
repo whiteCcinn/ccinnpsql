@@ -71,7 +71,7 @@ CcinnPsql 一键回答这些问题。它是原生 SwiftUI/AppKit 应用，自带
   - 服务端**通知**（`RAISE NOTICE`）和 **NOTIFY** 消息随结果一起展示。
   - 工具栏显示事务状态（事务中 / 已中止），用 PostgreSQL 的 CancelRequest **真正取消**语句，历史记录可搜索。
   - **可视化 EXPLAIN**（FORMAT JSON，可选 ANALYZE 与 BUFFERS）：计划树显示每个节点的自身耗时，高亮最慢节点、标出行数估算偏差，并提供节点详情面板。对修改数据的语句执行 EXPLAIN ANALYZE 时，会在确认后放进一个最终回滚的事务里执行。
-  - 导出为 CSV、TSV、JSON、Markdown 或 INSERT 语句，或用 `COPY … TO STDOUT` 将完整结果流式导出为 CSV。
+  - 复制或导出为 CSV、TSV、JSON、Markdown、SQL `INSERT`（每行一条，或每 1,000 行 / 约 1 MB 合并为一条多行语句）或 **Excel（.xlsx）**，或用 `COPY … TO STDOUT` 将完整结果流式导出为 CSV。Excel 保持数值精确：整数显示全部位数，`numeric(p,s)` 按精度显示，超过 15 位的 ID 保留为文本，布尔值为 `true`/`false`。
   - **LISTEN / NOTIFY** 面板：在独立连接上监听频道，通知到达即显示。
 - **任意结果一键成图**：时间折线、分类柱状、分组柱状、散点与饼图，支持系列与聚合；大结果集最多压缩到 2,000 个点。
 - **连接做到位**

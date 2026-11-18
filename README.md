@@ -71,7 +71,7 @@ CcinnPsql answers those in one click. It is a native SwiftUI/AppKit app with its
   - Server **notices** (`RAISE NOTICE`) and **NOTIFY** messages are shown with the result.
   - Transaction state (in transaction / aborted) in the toolbar, **real cancellation** with PostgreSQL's CancelRequest, history with search.
   - **Visual EXPLAIN** (FORMAT JSON, optionally ANALYZE and BUFFERS): a plan tree with self time per node, the slowest node highlighted, row-estimate misses flagged and a detail inspector. EXPLAIN ANALYZE of a data-modifying statement runs inside a transaction that is rolled back, after confirmation.
-  - Export as CSV, TSV, JSON, Markdown or INSERT statements, or stream a whole result to CSV with `COPY … TO STDOUT`.
+  - Copy or export as CSV, TSV, JSON, Markdown, SQL `INSERT` (one per row, or multi-row in batches of 1,000 rows / ~1 MB) or **Excel (.xlsx)**, or stream a whole result to CSV with `COPY … TO STDOUT`. Excel keeps values exact: integers show every digit, `numeric(p,s)` its scale, IDs beyond 15 digits stay text, booleans read `true`/`false`.
   - **LISTEN / NOTIFY** panel: listen to channels on a dedicated connection and see notifications as they arrive.
 - **Charts from any result**: line over time, bars by category, grouped bars, scatter and pie, with series and aggregation; large results are reduced to at most 2,000 points.
 - **Connections done right**

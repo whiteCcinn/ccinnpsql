@@ -5,6 +5,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-19
+
+### Added
+
+- **Excel export.** *Export to file › Excel…* writes an `.xlsx` workbook (no Office needed, no external library):
+  - numbers are number cells only when Excel keeps them exactly: integers show every digit (format `0`, never `1.2E+12`), `numeric(p,s)` its scale; integers and numerics beyond 15 significant digits, such as 64-bit IDs, stay exact text;
+  - booleans read `true` / `false`; dates, timestamps, composites, JSON and everything else are exact text; NULL is an empty cell; text over Excel's 32,767-character cell limit is cut, and the toast says how many values were;
+  - the header row is bold and frozen, and columns are sized to their content;
+  - results larger than a sheet (1,048,575 rows or 16,384 columns) are refused before anything is written, with a hint to use CSV or COPY.
+- **Multi-row SQL INSERT.** *Copy* and *Export to file › SQL INSERT, Multi-row* write `INSERT INTO t (…) VALUES` with one row per line, a new statement every 1,000 rows or before about 1 MB. The grid's context menu has *Copy Rows as Multi-row INSERT*.
+
+### Changed
+
+- *INSERT statements* is now *SQL INSERT, One per Row*. When the sidebar has not loaded the result's schema, INSERTs take the table of a plain single-table `SELECT … FROM [ONLY] schema.t [alias]` instead of the `exported` placeholder; exported files are named after it.
+
+### Fixed
+
+- `NaN` and `Infinity` in numeric and floating-point columns were written into INSERTs bare, which PostgreSQL reads as column names; they are now quoted literals.
+
 ## [1.3.2] - 2026-11-19
 
 ### Fixed
@@ -105,7 +124,8 @@ First public release.
 - SQL workbench: PostgreSQL highlighting, context-aware completion, run current / selection / all / as script, automatic LIMIT, exact error underline with SQLSTATE, detail and hint, notices, transaction state, cancellation, history, CSV/TSV/JSON/Markdown/INSERT export and COPY export, charts, visual EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON), and a LISTEN/NOTIFY panel.
 - MCP server (`CcinnPsql mcp`) so AI clients such as Claude Code, Codex and Claude Desktop can list connections, inspect servers, schemas, tables, statistics, activity, replication and top statements, and run read-only queries (checked by the app, including SQL inside string literals, executed in a READ ONLY transaction, with the session reset after every call) on connections the user opted in; read & write access is opt-in per connection, and every call is audited with secrets redacted.
 
-[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.2.0...v1.3.0
