@@ -380,7 +380,13 @@ struct EstimatorTests {
         #expect(SQLText.identifier("order") == "\"order\"")
         #expect(SQLText.identifier("a\"b") == "\"a\"\"b\"")
         #expect(SQLText.identifier("1abc") == "\"1abc\"")
-        #expect(SQLText.literal("it's\0") == "'it''s'")
+        // Quoting never changes a name or a value: a NUL stays, and the transport refuses the statement that carries it,
+        // instead of the server receiving a different name than the app built.
+        #expect(SQLText.literal("it's") == "'it''s'")
+        #expect(SQLText.literal("it's\0") == "'it''s\0'")
+        #expect(SQLText.quoteIdentifier("a\0b") == "\"a\0b\"")
+        #expect(SQLText.identifier("pg_\0stat") == "\"pg_\0stat\"")
+        #expect(throws: PostgresWireError.nulCharacter) { _ = try FrontendMessage.query("LISTEN " + SQLText.quoteIdentifier("chan\0nel")) }
         #expect(SQLText.qualified("public", "t") == "public.t")
     }
 }

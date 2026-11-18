@@ -3,9 +3,10 @@ import Foundation
 /// Safe construction of identifiers and literals for statements the app builds itself. Prefer bound
 /// parameters (`$1`); use these where PostgreSQL does not accept parameters (identifiers, utility commands).
 public enum SQLText {
-    /// Double-quoted identifier; embedded quotes are doubled, NUL bytes removed.
+    /// Double-quoted identifier; embedded quotes are doubled. Nothing else changes: a NUL stays, and the transport refuses
+    /// the statement (removing it would name a different object than the one asked for).
     public static func quoteIdentifier(_ name: String) -> String {
-        "\"" + name.replacingOccurrences(of: "\0", with: "").replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        "\"" + name.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     /// Identifier quoted only when needed (lower-case letters, digits, `_`, `$`, not starting with a digit or `$`, not a reserved word).
@@ -24,9 +25,10 @@ public enum SQLText {
         return identifier(schema) + "." + identifier(name)
     }
 
-    /// Standard-conforming string literal (`'it''s'`); NUL bytes removed (PostgreSQL text cannot hold them).
+    /// Standard-conforming string literal (`'it''s'`). A NUL stays, and the transport refuses the statement (PostgreSQL text
+    /// cannot hold one, and dropping it would send a different value).
     public static func literal(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "\0", with: "").replacingOccurrences(of: "'", with: "''") + "'"
+        "'" + value.replacingOccurrences(of: "'", with: "''") + "'"
     }
 
     /// Reserved key words that always need quoting as identifiers (PostgreSQL `RESERVED_KEYWORD` list).

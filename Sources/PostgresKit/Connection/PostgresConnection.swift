@@ -152,7 +152,7 @@ public actor PostgresConnection {
             var reader = QueryReader(limits: limits, run: run, timeZone: run.timeZone, extended: true)
             switch resultFormat {
             case .text:
-                let prelude = lockTimeout.map(Self.lockTimeoutPrelude) ?? []
+                let prelude = try lockTimeout.map(Self.lockTimeoutPrelude) ?? []
                 try await channel.send(prelude
                     + FrontendMessage.parse(statement: "", query: sql, parameterTypes: parameterTypes)
                     + FrontendMessage.bind(portal: "", statement: "", parameters: parameters, resultFormats: [])
@@ -187,9 +187,9 @@ public actor PostgresConnection {
 
     /// `set_config(…, true)` lasts until the end of the transaction, which in the extended protocol is the Sync
     /// after the statement (no `SET LOCAL` warning, no explicit transaction left behind on errors).
-    static func lockTimeoutPrelude(_ seconds: Double) -> [UInt8] {
+    static func lockTimeoutPrelude(_ seconds: Double) throws -> [UInt8] {
         let milliseconds = seconds.isFinite ? max(1, Int(seconds * 1000)) : 0
-        return FrontendMessage.parse(statement: "", query: "SELECT set_config('lock_timeout', $1, true) AS \(lockTimeoutColumn)")
+        return try FrontendMessage.parse(statement: "", query: "SELECT set_config('lock_timeout', $1, true) AS \(lockTimeoutColumn)")
             + FrontendMessage.bind(portal: "", statement: "", parameters: [.text(String(milliseconds))], resultFormats: [])
             + FrontendMessage.describe(.portal, name: "")
             + FrontendMessage.execute(portal: "", maxRows: 0)
@@ -316,14 +316,20 @@ public actor PostgresConnection {
         transport.close()
     }
 
+    /// SQL the protocol can carry unchanged: under 1 GB, and without NUL characters (the transport never strips them: the
+    /// server must receive exactly the text the app checked and showed).
     static func validate(_ sql: String) throws {
         guard sql.utf8.count < (1 << 30) else { throw PostgresError(.invalidArgument, "The statement is larger than 1 GB") }
+        guard !sql.utf8.contains(0) else {
+            throw PostgresError(.invalidArgument, "The SQL text contains a NUL character, which PostgreSQL cannot receive; nothing was sent")
+        }
     }
 
     static func mapError(_ error: any Error, endpoint: Endpoint) -> PostgresError {
         switch error {
         case let error as PostgresError: error
         case let failure as QueryFailure: failure.error
+        case PostgresWireError.nulCharacter: PostgresError(.invalidArgument, PostgresWireError.nulCharacter.description)
         case let wire as PostgresWireError:
             if case let .authentication(message) = wire { PostgresError(.authentication, message) } else {
                 PostgresError(.protocolViolation, "\(endpoint): \(wire.description)")

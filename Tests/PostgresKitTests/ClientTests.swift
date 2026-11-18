@@ -224,7 +224,7 @@ struct LockTimeoutTests {
     /// Review finding 11: the transaction-local lock_timeout travels in the statement's own pipeline (no Sync of
     /// its own), so it ends with the statement and costs no extra round trip.
     @Test func preludeSharesTheStatementsSync() throws {
-        let prelude = PostgresConnection.lockTimeoutPrelude(5)
+        let prelude = try PostgresConnection.lockTimeoutPrelude(5)
         var types: [Character] = []
         var reader = ByteReader(prelude)
         while !reader.isAtEnd {

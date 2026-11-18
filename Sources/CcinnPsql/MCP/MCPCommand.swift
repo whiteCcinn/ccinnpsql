@@ -105,7 +105,8 @@ enum MCPCommand {
 
     static let instructions = """
     CcinnPsql gives you access to the PostgreSQL databases the user enabled for AI access. Start with list_connections \
-    and server_info (version, pooler, extensions), then explore with list_databases, list_schemas, list_tables (tables, \
+    and server_info (version, pooler, extensions); get_settings lists built-in server parameters and list_roles the roles \
+    with their attributes and memberships. Explore with list_databases, list_schemas, list_tables (tables, \
     partitioned tables and partitions, views, materialized views, sequences) and describe_table. PostgreSQL insights: \
     get_table_stats (sizes, dead tuples, vacuum, bloat estimates, unused indexes), get_activity (sessions and the blocking \
     tree), get_replication (standbys, slots, lag) and get_top_statements (pg_stat_statements). run_query executes one \

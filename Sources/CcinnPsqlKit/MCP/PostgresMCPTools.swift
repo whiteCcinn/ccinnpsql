@@ -68,6 +68,13 @@ public struct PostgresMCPTools: MCPToolProvider {
             MCPTool(name: "list_databases", title: "List databases",
                     description: "Databases of the server with size, owner, encoding and transaction-ID age.",
                     inputSchema: Self.schema([:]), readOnly: true),
+            MCPTool(name: "get_settings", title: "Server settings",
+                    description: "Built-in server parameters (name, setting, unit, category, short_desc, source, pending_restart). Custom parameters (names with a dot) are never listed: they can hold secrets. Use this instead of pg_settings, which run_query refuses.",
+                    inputSchema: Self.schema(["filter": ["type": "string", "description": "Case-insensitive part of the parameter name, e.g. vacuum."]]),
+                    readOnly: true),
+            MCPTool(name: "list_roles", title: "List roles",
+                    description: "Roles with their attributes (superuser, inherit, create role, create database, login, replication, bypass RLS, connection limit) and the roles each is a member of. Role settings, passwords and password expiry are never included. Use this instead of pg_roles, which run_query refuses.",
+                    inputSchema: Self.schema([:]), readOnly: true),
             MCPTool(name: "list_schemas", title: "List schemas",
                     description: "Schemas of a database (system schemas excluded unless include_system is true).",
                     inputSchema: Self.schema(["database": Self.databaseProperty,
@@ -88,7 +95,7 @@ public struct PostgresMCPTools: MCPToolProvider {
                     inputSchema: Self.schema(["schema": Self.schemaProperty, "table": Self.tableProperty, "database": Self.databaseProperty],
                                              required: ["schema", "table"]), readOnly: true, idempotent: false),
             MCPTool(name: "get_activity", title: "Activity and blocking",
-                    description: "Sessions from pg_stat_activity (state, wait event, query duration, client, query) and the blocking tree built from pg_blocking_pids. Idle sessions are omitted unless include_idle is true.",
+                    description: "Sessions from pg_stat_activity (state, wait event, query duration, client, query) and the blocking tree built from pg_blocking_pids. Queries are redacted: every literal is replaced by ?. Idle sessions are omitted unless include_idle is true.",
                     inputSchema: Self.schema(["include_idle": ["type": "boolean", "description": "Include idle sessions (default false)."],
                                               "limit": ["type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum sessions (default 100)."]]),
                     readOnly: true, idempotent: false),
@@ -96,7 +103,7 @@ public struct PostgresMCPTools: MCPToolProvider {
                     description: "Standbys connected to this server with write/flush/replay lag, replication slots with retained WAL and status, and standby facts when this server is in recovery.",
                     inputSchema: Self.schema([:]), readOnly: true, idempotent: false),
             MCPTool(name: "get_top_statements", title: "Top statements",
-                    description: "Most expensive statements from pg_stat_statements (calls, total/mean/max time, rows, cache hit ratio, temp blocks), if the extension is installed.",
+                    description: "Most expensive statements from pg_stat_statements (calls, total/mean/max time, rows, cache hit ratio, temp blocks), if the extension is installed. Queries are redacted: every literal is replaced by ?.",
                     inputSchema: Self.schema(["database": Self.databaseProperty,
                                               "limit": ["type": "integer", "minimum": 1, "maximum": 200, "description": "Statements to return (default 20)."]]),
                     readOnly: true, idempotent: false),
@@ -140,11 +147,20 @@ public struct PostgresMCPTools: MCPToolProvider {
 
     // MARK: Calls
 
-    /// Collects audit details while a tool runs.
+    /// Collects audit details while a tool runs, and the role check's notices for the response.
     final class CallContext: @unchecked Sendable {
         var connection: String?
         var statement: String?
         var rows: Int?
+        private let lock = NSLock()
+        private var notices: [String] = []
+
+        /// The role check's `security_notices`, for the response whether the call succeeds or fails. Locked: the check runs
+        /// inside the statement's deadline, on a child task.
+        var securityNotices: [String] {
+            get { lock.withLock { notices } }
+            set { lock.withLock { notices = newValue } }
+        }
     }
 
     public func call(name: String, arguments: [String: JSONValue]) async -> MCPToolResult {
@@ -152,29 +168,52 @@ public struct PostgresMCPTools: MCPToolProvider {
         let started = clock.now
         let context = CallContext()
         let result: MCPToolResult
+        var failure: String?
         do {
-            result = .success(try await dispatch(name, MCPArguments(arguments), context))
-        } catch let error as MCPToolError {
-            result = .failure(error.message)
-        } catch let error as PostgresError {
-            var message = error.summary
-            if let detail = error.detail { message += "\nDetail: \(detail)" }
-            if let hint = error.hint { message += "\nHint: \(hint)" }
-            if error.sqlState == "25006" { message += "\nThe statement tried to write; read-only tools run inside a READ ONLY transaction." }
-            result = .failure(message)
+            let payload = try await dispatch(name, MCPArguments(arguments), context)
+            result = .success(Self.adding(context.securityNotices, to: payload))
         } catch {
-            result = .failure(error.localizedDescription)
+            let message = Self.describe(error)
+            failure = message
+            result = .failure(Self.failureMessage(message, notices: context.securityNotices))
         }
         let elapsed = clock.now - started
         let milliseconds = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
         await audit?.record(tool: name, connection: context.connection, statement: context.statement, durationMilliseconds: milliseconds,
-                            rows: context.rows, error: result.isError ? result.payload.stringValue : nil)
+                            rows: context.rows, error: failure)
         return result
     }
 
+    /// An error as the AI reads it.
+    static func describe(_ error: any Error) -> String {
+        switch error {
+        case let error as MCPToolError:
+            return error.message
+        case let error as PostgresError:
+            var message = error.summary
+            if let detail = error.detail { message += "\nDetail: \(detail)" }
+            if let hint = error.hint { message += "\nHint: \(hint)" }
+            if error.sqlState == "25006" { message += "\nThe statement tried to write; read-only tools run inside a READ ONLY transaction." }
+            return message
+        default:
+            return error.localizedDescription
+        }
+    }
+
+    /// An error response: the message, then the role check's notices (a failed call reports them as a successful one does
+    /// in `security_notices`).
+    static func failureMessage(_ message: String, notices: [String]) -> String {
+        guard !notices.isEmpty else { return message }
+        return message + "\n\nsecurity_notices:\n" + notices.map { "- " + $0 }.joined(separator: "\n")
+    }
+
     private func dispatch(_ name: String, _ args: MCPArguments, _ context: CallContext) async throws -> JSONValue {
+        // Before anything else: names reach the server as given, so they must be plain text.
+        if let key = args.controlCharacterArgument() {
+            throw MCPToolError("`\(key)` contains a control character. Names are sent to the server as given, so they must be plain text.")
+        }
         if name == "list_connections" { return listConnections() }
-        let known = ["server_info", "list_databases", "list_schemas", "list_tables", "describe_table", "get_table_stats", "get_activity",
+        let known = ["server_info", "list_databases", "get_settings", "list_roles", "list_schemas", "list_tables", "describe_table", "get_table_stats", "get_activity",
                      "get_replication", "get_top_statements", "run_query", "explain_query", "execute_statement"]
         guard known.contains(name) else { throw MCPToolError("Unknown tool “\(name)”.") }
         let resolved = try resolver.resolve(args.string("connection"))
@@ -191,20 +230,47 @@ public struct PostgresMCPTools: MCPToolProvider {
         if client.serverInfo.isPgBouncerConsole, !["server_info", "run_query"].contains(name) {
             throw MCPToolError("This connection is the PgBouncer admin console; only server_info and run_query with SHOW commands (SHOW POOLS, SHOW STATS, …) work here.")
         }
-        switch name {
-        case "server_info": return serverInfo(client)
-        case "list_databases": return try await listDatabases(client)
-        case "list_schemas": return try await listSchemas(client, args)
-        case "list_tables": return try await listTables(client, args)
-        case "describe_table": return try await describeTable(client, args)
-        case "get_table_stats": return try await tableStats(client, args)
-        case "get_activity": return try await activity(client, args)
-        case "get_replication": return try await replication(client)
-        case "get_top_statements": return try await topStatements(client, args)
-        case "run_query": return try await runQuery(client, args, context, access: resolved.access)
-        case "explain_query": return try await explain(client, args, context)
-        default: return try await execute(client, args, context)
+        // Read-only access checks the session's role on every call: run_query and explain_query on their own connection,
+        // inside the transaction that runs the statement (see `readOnly`); every other tool here, in a READ ONLY transaction
+        // of its own on the database it reads. (PgBouncer's admin console is not PostgreSQL: no catalog, SHOW only.) The
+        // check's notices go into `context`, so the response carries them whether the call succeeds or fails.
+        let policy = Self.rolePolicy(for: resolved)
+        if let policy, !Self.statementTools.contains(name), !client.serverInfo.isPgBouncerConsole {
+            try await Self.checkRole(client, database: args.string("database"), policy: policy, context: context)
         }
+        return switch name {
+        case "server_info": serverInfo(client)
+        case "list_databases": try await listDatabases(client)
+        case "get_settings": MCPSafeCatalog.settings(try await client.records(MCPSafeCatalog.settingsQuery), filter: args.string("filter"))
+        case "list_roles": MCPSafeCatalog.roles(try await client.records(MCPSafeCatalog.rolesQuery))
+        case "list_schemas": try await listSchemas(client, args)
+        case "list_tables": try await listTables(client, args)
+        case "describe_table": try await describeTable(client, args)
+        case "get_table_stats": try await tableStats(client, args)
+        case "get_activity": try await activity(client, args)
+        case "get_replication": try await replication(client)
+        case "get_top_statements": try await topStatements(client, args)
+        case "run_query": try await runQuery(client, args, context, access: resolved.access, policy: policy)
+        case "explain_query": try await explain(client, args, context, policy: policy)
+        default: try await execute(client, args, context)
+        }
+    }
+
+    /// Tools that run their statement through `readOnly`, which checks the role in the same transaction.
+    static let statementTools: Set<String> = ["run_query", "explain_query"]
+
+    /// How a call checks the session's role: read-only access refuses a privileged role unless the connection allows it;
+    /// read & write access already lets the AI run anything the role can, so it is not checked.
+    static func rolePolicy(for resolved: MCPProfileResolver.Resolved) -> MCPRolePolicy? {
+        guard resolved.access == .readOnly else { return nil }
+        return resolved.profile.mcpAllowPrivilegedRole ? .allowPrivileged : .refusePrivileged
+    }
+
+    /// `payload` with the role check's notices (`security_notices`), when there are any.
+    static func adding(_ notices: [String], to payload: JSONValue) -> JSONValue {
+        guard !notices.isEmpty, case var .object(fields) = payload else { return payload }
+        fields["security_notices"] = .array(notices.map { .string($0) })
+        return .object(fields)
     }
 
     private func listConnections() -> JSONValue {
@@ -360,7 +426,7 @@ public struct PostgresMCPTools: MCPToolProvider {
         let tree = BlockingTree.build(snapshot.sessions)
         func encode(_ node: BlockingNode) -> JSONValue {
             ["pid": .int(Int64(node.session.pid)), "user": JSONValue(node.session.user), "state": JSONValue(node.session.state),
-             "wait": JSONValue(node.session.waitDescription), "query": JSONValue(node.session.query.map { String($0.prefix(500)) }),
+             "wait": JSONValue(node.session.waitDescription), "query": JSONValue(node.session.query.map { String(SQLRedactor.digest($0).prefix(500)) }),
              "blocked": .array(node.waiters.map(encode))]
         }
         return [
@@ -372,7 +438,8 @@ public struct PostgresMCPTools: MCPToolProvider {
                     "query_seconds": JSONValue(session.querySeconds.map { ($0 * 10).rounded() / 10 }),
                     "transaction_seconds": JSONValue(session.transactionSeconds.map { ($0 * 10).rounded() / 10 }),
                     "blocked_by": .array(session.blockedBy.map { .int(Int64($0)) }),
-                    "query": JSONValue(session.query.map { String($0.prefix(2_000)) }),
+                    // Other sessions' SQL: every literal becomes `?` (it is why the raw views are refused to run_query).
+                    "query": JSONValue(session.query.map { String(SQLRedactor.digest($0).prefix(2_000)) }),
                 ].filter { $0.value != .null })
             }),
             "session_count": .int(Int64(sessions.count)), "truncated": .bool(sessions.count > limit),
@@ -415,7 +482,8 @@ public struct PostgresMCPTools: MCPToolProvider {
         }
         return ["statements": .array(statements.map { statement in
             .object([
-                "query": .string(String(statement.query.prefix(4_000))), "calls": .int(statement.calls),
+                // pg_stat_statements keeps the literals of utility statements and of what it cannot normalise.
+                "query": .string(String(SQLRedactor.digest(statement.query).prefix(4_000))), "calls": .int(statement.calls),
                 "total_ms": .double((statement.totalMilliseconds * 100).rounded() / 100),
                 "mean_ms": JSONValue(statement.meanMilliseconds.map { ($0 * 100).rounded() / 100 }),
                 "max_ms": JSONValue(statement.maxMilliseconds.map { ($0 * 100).rounded() / 100 }), "rows": JSONValue(statement.rows),
@@ -427,25 +495,21 @@ public struct PostgresMCPTools: MCPToolProvider {
 
     // MARK: SQL tools
 
-    private func runQuery(_ client: PostgresClient, _ args: MCPArguments, _ context: CallContext, access: MCPAccess) async throws -> JSONValue {
+    private func runQuery(_ client: PostgresClient, _ args: MCPArguments, _ context: CallContext, access: MCPAccess,
+                          policy: MCPRolePolicy?) async throws -> JSONValue {
         let sql = try args.required("sql")
-        if let reason = ReadOnlySQLGuard.check(sql) {
-            let hint = access == .readWrite ? " Use execute_statement for statements that change data." : ""
-            throw MCPToolError(reason + hint)
-        }
-        guard let statement = SQLStatementSplitter.split(sql).first?.text else { throw MCPToolError("The statement is empty.") }
         let limit = args.int("limit", default: Self.defaultRowLimit, range: 1...Self.maxRowLimit)
-        var executed = statement
-        var limitApplied = false
-        if SQLStatementKind.of(statement) == .query {
-            let outcome = AutoLimit.apply(to: statement, limit: limit + 1)
-            executed = outcome.sql
-            limitApplied = outcome.applied
+        let executed: String
+        let limitApplied: Bool
+        do {
+            (executed, limitApplied) = try Self.prepareQuery(sql: sql, limit: limit + 1)
+        } catch let error as MCPToolError {
+            throw MCPToolError(error.message + (access == .readWrite ? " Use execute_statement for statements that change data." : ""))
         }
         context.statement = executed
         let started = ContinuousClock.now
         let result = try await Self.readOnly(client, sql: executed, database: args.string("database"), timeout: timeout(args),
-                                             limits: RowLimits(maxRows: limit, maxBytes: 64 * 1024 * 1024))
+                                             limits: RowLimits(maxRows: limit, maxBytes: 64 * 1024 * 1024), policy: policy, context: context)
         let elapsed = ContinuousClock.now - started
         var payload = Self.encode(result: result, limitRows: limit)
         context.rows = payload["row_count"]?.intValue.map { Int(clamping: $0) }
@@ -457,7 +521,23 @@ public struct PostgresMCPTools: MCPToolProvider {
         return .object(payload)
     }
 
-    private func explain(_ client: PostgresClient, _ args: MCPArguments, _ context: CallContext) async throws -> JSONValue {
+    /// The text run_query sends: the guard's statement, auto-limited, and checked again by the guard after the rewrite (the
+    /// guard always checks exactly what is sent).
+    static func prepareQuery(sql: String, limit: Int) throws -> (executed: String, limitApplied: Bool) {
+        if let reason = ReadOnlySQLGuard.check(sql) { throw MCPToolError(reason) }
+        guard let statement = SQLStatementSplitter.split(sql).first?.text else { throw MCPToolError("The statement is empty.") }
+        var executed = statement
+        var limitApplied = false
+        if SQLStatementKind.of(statement) == .query {
+            let outcome = AutoLimit.apply(to: statement, limit: limit)
+            executed = outcome.sql
+            limitApplied = outcome.applied
+        }
+        if let reason = ReadOnlySQLGuard.check(executed) { throw MCPToolError(reason) }
+        return (executed, limitApplied)
+    }
+
+    private func explain(_ client: PostgresClient, _ args: MCPArguments, _ context: CallContext, policy: MCPRolePolicy?) async throws -> JSONValue {
         let sql = try args.required("sql")
         let statements = SQLStatementSplitter.split(sql)
         guard statements.count == 1, let statement = statements.first?.text else { throw MCPToolError("Pass exactly one query.") }
@@ -467,7 +547,7 @@ public struct PostgresMCPTools: MCPToolProvider {
         if let reason = ReadOnlySQLGuard.check(body) { throw MCPToolError(reason) }
         context.statement = body
         let result = try await Self.readOnly(client, sql: body, database: args.string("database"), timeout: timeout(args),
-                                             limits: RowLimits(maxRows: 10, maxBytes: 32 * 1024 * 1024))
+                                             limits: RowLimits(maxRows: 10, maxBytes: 32 * 1024 * 1024), policy: policy, context: context)
         guard let json = result.lastRowSet?.scalar else { throw MCPToolError("EXPLAIN returned no plan.") }
         let plan = try ExplainPlan.parse(json)
         context.rows = plan.nodes.count
@@ -528,8 +608,11 @@ public struct PostgresMCPTools: MCPToolProvider {
     }
 
     /// Runs one statement through the extended protocol inside `BEGIN READ ONLY … ROLLBACK` with a server-side
-    /// statement timeout (design D14). Cancelling the calling task sends a CancelRequest.
-    static func readOnly(_ client: PostgresClient, sql: String, database: String?, timeout: Double, limits: RowLimits) async throws -> QueryResult {
+    /// statement timeout (design D14). With a `policy` (read-only access), the session's role is checked first on the same
+    /// connection, inside the same transaction, immediately before the statement; its notices go into `context`.
+    /// Cancelling the calling task sends a CancelRequest.
+    static func readOnly(_ client: PostgresClient, sql: String, database: String?, timeout: Double, limits: RowLimits,
+                         policy: MCPRolePolicy?, context: CallContext) async throws -> QueryResult {
         if client.serverInfo.isPgBouncerConsole {
             guard SQLStatementKind.of(sql) == .show else {
                 throw MCPToolError("The PgBouncer admin console only accepts SHOW commands (SHOW POOLS, SHOW STATS, SHOW CLIENTS, …).")
@@ -538,12 +621,14 @@ public struct PostgresMCPTools: MCPToolProvider {
             guard ReadOnlySQLGuard.isSingleStatement(sql) else {
                 throw MCPToolError("Only one statement can be run at a time; send statements separately.")
             }
+            // PgBouncer's admin console is not PostgreSQL: there is no catalog (and no server program or file) to check.
             return try await client.simpleQuery(sql, database: database, limits: limits, timeout: timeout)
         }
         return try await client.withConnection(database: database) { connection in
             try await Deadline.run(seconds: timeout, timeoutError: timeoutError(timeout)) {
                 do {
                     _ = try await connection.simpleQuery(client.routingPrefix + readOnlyPreamble(timeout: timeout), limits: .metadata)
+                    if let policy { try await checkRole(on: connection, client: client, policy: policy, context: context, statement: sql) }
                     let result = try await connection.extendedQuery(sql, limits: limits)
                     // Same connection, still inside the read-only transaction: a second checkout could wait forever on
                     // a one-connection pool.
@@ -556,6 +641,63 @@ public struct PostgresMCPTools: MCPToolProvider {
                 }
             }
         }
+    }
+
+    /// The role check for a tool that does not run a statement of the AI's: in a READ ONLY transaction of its own, on the
+    /// database the tool reads. Records its notices in `context`, then refuses under `policy`.
+    static func checkRole(_ client: PostgresClient, database: String?, policy: MCPRolePolicy, context: CallContext) async throws {
+        try decide(try await inspectRole(client, database: database), policy: policy, context: context)
+    }
+
+    /// What the role check finds for `client`'s role in `database`, without deciding (Settings → MCP shows it).
+    public static func inspectRole(_ client: PostgresClient, database: String?) async throws -> MCPRoleCheck {
+        try await client.withConnection(database: database) { connection in
+            do {
+                _ = try await connection.simpleQuery(client.routingPrefix + readOnlyPreamble(timeout: 30), limits: .metadata)
+                let check = try await fetchRoleCheck(on: connection, client: client)
+                await endCall(on: connection, client: client)
+                return check
+            } catch {
+                await endCall(on: connection, client: client)
+                throw error
+            }
+        }
+    }
+
+    /// Runs the check in the open READ ONLY transaction, records its notices in `context` and refuses the call under `policy`,
+    /// or when `statement` (exactly the text about to be sent) may not run in this database (its encoding is known now).
+    static func checkRole(on connection: PostgresConnection, client: PostgresClient, policy: MCPRolePolicy, context: CallContext,
+                          statement: String) async throws {
+        try decide(try await fetchRoleCheck(on: connection, client: client), policy: policy, context: context, statement: statement)
+    }
+
+    /// The notices first (a refused call reports them too), then the refusal, then the statement in this database.
+    private static func decide(_ check: MCPRoleCheck, policy: MCPRolePolicy, context: CallContext, statement: String? = nil) throws {
+        context.securityNotices = check.notices(policy)
+        if let refusal = check.refusal(policy) { throw MCPToolError(refusal) }
+        if let statement, let refusal = check.refusal(forStatement: statement) { throw MCPToolError(refusal) }
+    }
+
+    /// Inside the open READ ONLY transaction: reads the session's effective search path (`MCPRoleCheck.searchPathQuery`),
+    /// pins `search_path` to the catalog, runs `MCPRoleCheck.query`, then restores it (the statement that follows resolves
+    /// names as the session does; it is not rewritten). Any failure throws `MCPToolError`, so the call is refused: it fails
+    /// closed.
+    static func fetchRoleCheck(on connection: PostgresConnection, client: PostgresClient) async throws -> MCPRoleCheck {
+        let check: MCPRoleCheck
+        do {
+            let path = try await connection.simpleQuery(
+                client.routingPrefix + MCPRoleCheck.searchPathQuery + "; SET LOCAL search_path = pg_catalog, pg_temp", limits: .metadata)
+            let answer = try await connection.extendedQuery(client.routingPrefix + MCPRoleCheck.query, limits: .metadata)
+            _ = try await connection.simpleQuery(client.routingPrefix + "SET LOCAL search_path TO DEFAULT", limits: .metadata)
+            let empty = ResultSet(columns: [], rows: [])
+            check = try MCPRoleCheck(answer.lastRowSet ?? empty, searchPath: path.lastRowSet ?? empty)
+        } catch let error as MCPToolError {
+            throw error
+        } catch {
+            let reason = (error as? PostgresError)?.summary ?? error.localizedDescription
+            throw MCPToolError("Could not check this connection's role (\(reason)), so read-only AI access is refused.")
+        }
+        return check
     }
 
     /// Opens the read-only transaction. `standard_conforming_strings` is pinned because the guard lexes plain
@@ -650,6 +792,16 @@ struct MCPArguments: Sendable {
         }
         guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
+    }
+
+    /// The first argument other than `sql` (which the read-only guard checks) whose text holds a control character (Unicode
+    /// Cc: NUL, C0, DEL, C1). Names reach the server as given (startup packet, catalog lookups, quoted identifiers), so such
+    /// a name could be refused late or reach the server differently from how the call was checked and audited.
+    func controlCharacterArgument() -> String? {
+        values.keys.sorted().first { key in
+            guard key != "sql", case let .string(text) = values[key] else { return false }
+            return text.unicodeScalars.contains { $0.properties.generalCategory == .control }
+        }
     }
 
     func required(_ key: String) throws -> String {

@@ -336,7 +336,8 @@ public enum AutoLimit {
             }
             lastSignificant = token
         }
-        guard let lastSignificant else { return Outcome(sql: sql, applied: false) }
+        // Not after an unterminated string, quoted identifier or dollar quote: the clause would land inside it.
+        guard let lastSignificant, analysis.lexer.unterminated(lastSignificant) == nil else { return Outcome(sql: sql, applied: false) }
         let insertAt = lastSignificant.range.upperBound
         let units = analysis.lexer.units
         let head = String(decoding: units[0..<insertAt], as: UTF16.self)

@@ -34,7 +34,9 @@ struct PoolerIntegrationTests {
         // The metadata lock_timeout rides in the statement's own pipeline, so it holds through transaction pooling.
         #expect(try await client.records("SELECT current_setting('lock_timeout') AS t").first?.text("t") == "5s")
         // The MCP read-only runner works through transaction pooling (preamble, statement and epilogue).
-        let profile = ConnectionProfile(name: "PgBouncer", host: "127.0.0.1", port: 15430, username: "ccinn", database: "ccinn", mcpAccess: .readOnly)
+        let profile = ConnectionProfile(name: "PgBouncer", host: "127.0.0.1", port: 15430, username: "ccinn", database: "ccinn", mcpAccess: .readOnly,
+                                        // The superuser test role: these checks are about the layers behind the role check.
+                                        mcpAllowPrivilegedRole: true)
         let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
                                      registry: MCPClientRegistry { _ in client }, audit: nil)
         let read = await tools.call(name: "run_query", arguments: [
@@ -116,7 +118,9 @@ struct PoolerIntegrationTests {
         #expect(!snapshot.sessions.isEmpty)
         #expect(try await client.records("SELECT current_setting('lock_timeout') AS t").first?.text("t") == "5s")
         // The MCP read-only runner (multi-statement preamble and epilogue) through Pgpool.
-        let profile = ConnectionProfile(name: "Pgpool", host: "127.0.0.1", port: 15431, username: "ccinn", database: "ccinn", mcpAccess: .readOnly)
+        let profile = ConnectionProfile(name: "Pgpool", host: "127.0.0.1", port: 15431, username: "ccinn", database: "ccinn", mcpAccess: .readOnly,
+                                        // The superuser test role: these checks are about the layers behind the role check.
+                                        mcpAllowPrivilegedRole: true)
         let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
                                      registry: MCPClientRegistry { _ in client }, audit: nil)
         let read = await tools.call(name: "run_query", arguments: ["sql": "SELECT current_setting('standard_conforming_strings') AS scs"])

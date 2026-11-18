@@ -40,11 +40,11 @@ struct ByteReaderTests {
         #expect(throws: PostgresWireError.self) { try negative.readBytes(-1) }
     }
 
-    @Test func writerProducesNetworkOrder() {
+    @Test func writerProducesNetworkOrder() throws {
         var writer = ByteWriter()
         writer.writeInt16(-1)
         writer.writeInt32(196_608)
-        writer.writeCString("x")
+        try writer.writeCString("x")
         #expect(writer.bytes == [0xFF, 0xFF, 0x00, 0x03, 0x00, 0x00, 0x78, 0x00])
     }
 }
@@ -52,7 +52,7 @@ struct ByteReaderTests {
 @Suite("Frontend messages")
 struct FrontendMessageTests {
     @Test func startupMessageHasProtocol30AndParameters() throws {
-        let bytes = FrontendMessage.startup(parameters: [("user", "alice"), ("database", "db")])
+        let bytes = try FrontendMessage.startup(parameters: [("user", "alice"), ("database", "db")])
         var reader = ByteReader(bytes)
         #expect(try reader.readInt32() == Int32(bytes.count))
         #expect(try reader.readInt32() == 196_608)
@@ -64,11 +64,19 @@ struct FrontendMessageTests {
         #expect(reader.isAtEnd)
     }
 
-    @Test func startupDropsNulBytesFromParameters() throws {
-        let bytes = FrontendMessage.startup(parameters: [("user", "a\0b")])
-        var reader = ByteReader(Array(bytes.dropFirst(8)))
-        #expect(try reader.readCString() == "user")
-        #expect(try reader.readCString() == "ab")
+    // The transport never changes text: a NUL cannot be represented in a protocol string, so the message is refused
+    // (removing it would send different SQL than the app checked and the user sees).
+    @Test func nulBytesAreRefusedNeverStripped() throws {
+        #expect(throws: PostgresWireError.nulCharacter) { _ = try FrontendMessage.startup(parameters: [("user", "a\0b")]) }
+        #expect(throws: PostgresWireError.nulCharacter) {
+            _ = try FrontendMessage.startup(parameters: [("user", "u"), ("database", "information_\0schema")])
+        }
+        #expect(throws: PostgresWireError.nulCharacter) { _ = try FrontendMessage.startup(parameters: [("user", "u"), ("options", "-c\0x")]) }
+        #expect(throws: PostgresWireError.nulCharacter) { _ = try FrontendMessage.query("SELECT pg_read\0_file('/etc/hostname')") }
+        #expect(throws: PostgresWireError.nulCharacter) { _ = try FrontendMessage.parse(statement: "", query: "SELECT 1 IN\0TO t") }
+        #expect(throws: PostgresWireError.nulCharacter) { _ = try FrontendMessage.password("pa\0ss") }
+        var reader = ByteReader(Array(try FrontendMessage.query("SELECT 'é'").dropFirst(5)))
+        #expect(try reader.readCString() == "SELECT 'é'")
     }
 
     @Test func sslRequestAndCancelRequest() throws {
@@ -77,12 +85,12 @@ struct FrontendMessageTests {
         #expect(cancel == concatBytes([0, 0, 0, 16, 0x04, 0xD2, 0x16, 0x2E], int32(4242), [1, 2, 3, 4]))
     }
 
-    @Test func queryMessage() {
-        #expect(FrontendMessage.query("SELECT 1") == concatBytes([UInt8(ascii: "Q")], int32(13), cstring("SELECT 1")))
+    @Test func queryMessage() throws {
+        #expect(try FrontendMessage.query("SELECT 1") == concatBytes([UInt8(ascii: "Q")], int32(13), cstring("SELECT 1")))
     }
 
     @Test func extendedQuerySequence() throws {
-        let parse = FrontendMessage.parse(statement: "", query: "SELECT $1::int", parameterTypes: [23])
+        let parse = try FrontendMessage.parse(statement: "", query: "SELECT $1::int", parameterTypes: [23])
         // Built step by step: one long `+` chain is too slow for older type checkers (Swift 6.2 in CI).
         let parseLength: Int32 = 4 + 1 + 15 + 2 + 4
         var expectedParse: [UInt8] = [UInt8(ascii: "P")]
@@ -93,7 +101,7 @@ struct FrontendMessageTests {
         expectedParse.append(contentsOf: int32(23))
         #expect(parse == expectedParse)
 
-        let bind = FrontendMessage.bind(portal: "", statement: "", parameters: [.text("42"), .null, .binary([1])], resultFormats: [.binary])
+        let bind = try FrontendMessage.bind(portal: "", statement: "", parameters: [.text("42"), .null, .binary([1])], resultFormats: [.binary])
         var reader = ByteReader(Array(bind.dropFirst(5)))
         #expect(bind.first == UInt8(ascii: "B"))
         #expect(try reader.readCString() == "")
@@ -112,22 +120,22 @@ struct FrontendMessageTests {
         #expect(try reader.readInt16() == 1)
         #expect(reader.isAtEnd)
 
-        #expect(FrontendMessage.describe(.portal, name: "") == concatBytes([UInt8(ascii: "D")], int32(6), [UInt8(ascii: "P"), 0]))
-        #expect(FrontendMessage.execute(portal: "", maxRows: 0) == concatBytes([UInt8(ascii: "E")], int32(9), [0], int32(0)))
+        #expect(try FrontendMessage.describe(.portal, name: "") == concatBytes([UInt8(ascii: "D")], int32(6), [UInt8(ascii: "P"), 0]))
+        #expect(try FrontendMessage.execute(portal: "", maxRows: 0) == concatBytes([UInt8(ascii: "E")], int32(9), [0], int32(0)))
         #expect(FrontendMessage.sync == [UInt8(ascii: "S"), 0, 0, 0, 4])
         #expect(FrontendMessage.flush == [UInt8(ascii: "H"), 0, 0, 0, 4])
         #expect(FrontendMessage.terminate == [UInt8(ascii: "X"), 0, 0, 0, 4])
     }
 
     @Test func saslMessages() throws {
-        let initial = FrontendMessage.saslInitialResponse(mechanism: "SCRAM-SHA-256", data: Array("n,,n=,r=abc".utf8))
+        let initial = try FrontendMessage.saslInitialResponse(mechanism: "SCRAM-SHA-256", data: Array("n,,n=,r=abc".utf8))
         var reader = ByteReader(Array(initial.dropFirst(5)))
         #expect(initial.first == UInt8(ascii: "p"))
         #expect(try reader.readCString() == "SCRAM-SHA-256")
         #expect(try reader.readInt32() == 11)
         #expect(Array(try reader.readBytes(11)) == Array("n,,n=,r=abc".utf8))
         #expect(FrontendMessage.saslResponse([9, 8]) == concatBytes([UInt8(ascii: "p")], int32(6), [9, 8]))
-        #expect(FrontendMessage.copyFail("no") == concatBytes([UInt8(ascii: "f")], int32(7), cstring("no")))
+        #expect(try FrontendMessage.copyFail("no") == concatBytes([UInt8(ascii: "f")], int32(7), cstring("no")))
     }
 }
 

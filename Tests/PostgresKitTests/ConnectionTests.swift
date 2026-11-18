@@ -77,6 +77,33 @@ struct ConnectionTests {
         #expect(network.servers.withLock { $0.isEmpty })
     }
 
+    // SQL with a NUL is refused before anything is sent (the server would otherwise run different text than the app
+    // checked), and the connection stays usable.
+    @Test func sqlWithANulCharacterIsRefusedAndNothingIsSent() async throws {
+        let received = OSAllocatedUnfairLock(initialState: [String]())
+        let network = FakeNetwork { _ in
+            FakePostgresServer { query in
+                received.withLock { $0.append(query) }
+                return .bytes(Wire.rows(["a"], [["1"]]))
+            }
+        }
+        let connection = try await PostgresConnection.connect(fakeConfiguration(), transportFactory: network.factory)
+        for sql in ["SELECT pg_read\0_file('/etc/hostname')", "SELECT 1 IN\0TO t", "SELECT 'CO\0PY'"] {
+            for extended in [false, true] {
+                do {
+                    _ = extended ? try await connection.extendedQuery(sql) : try await connection.simpleQuery(sql)
+                    Issue.record("sent: \(sql.debugDescription)")
+                } catch let error as PostgresError {
+                    #expect(error.kind == .invalidArgument)
+                    #expect(error.message.contains("NUL"))
+                }
+            }
+        }
+        #expect(received.withLock { $0 }.isEmpty, "nothing reached the server")
+        #expect(await connection.isBroken == false)
+        #expect(try await connection.simpleQuery("SELECT a").lastRowSet?.rows == [["1"]])
+    }
+
     @Test func queriesAndServerErrorsKeepTheConnection() async throws {
         let network = FakeNetwork { _ in
             FakePostgresServer { query in

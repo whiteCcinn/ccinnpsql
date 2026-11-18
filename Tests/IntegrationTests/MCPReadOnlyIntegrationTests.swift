@@ -67,7 +67,9 @@ struct MCPReadOnlyIntegrationTests {
         try await listener.listen("ccinnpsql_mcp_it")
 
         let profile = ConnectionProfile(name: "IT \(version)", host: "127.0.0.1", port: IT.port(version), username: "ccinn", database: "ccinn",
-                                        mcpAccess: .readOnly)
+                                        mcpAccess: .readOnly,
+                                        // The superuser test role: these checks are about the layers behind the role check.
+                                        mcpAllowPrivilegedRole: true)
         let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
                                      registry: MCPClientRegistry { _ in client }, audit: nil)
 
@@ -142,7 +144,9 @@ struct MCPReadOnlyIntegrationTests {
         // type-name lookup must not wait for a second connection.
         let mcpClient = try await PostgresClient.connect(IT.configuration(version), poolSize: 1)
         let profile = ConnectionProfile(name: "IT \(version)", host: "127.0.0.1", port: IT.port(version), username: "ccinn", database: "ccinn",
-                                        mcpAccess: .readOnly)
+                                        mcpAccess: .readOnly,
+                                        // The superuser test role: these checks are about the layers behind the role check.
+                                        mcpAllowPrivilegedRole: true)
         let tools = PostgresMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
                                      registry: MCPClientRegistry { _ in mcpClient }, audit: nil)
 

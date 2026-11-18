@@ -49,6 +49,10 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
     public var connectTimeout: Double
     /// AI access through the MCP server (off unless the user opts in).
     public var mcpAccess: MCPAccess
+    /// Allow read-only AI access even when the role can run server programs or touch server files (a superuser, or a member
+    /// of pg_execute_server_program / pg_read_server_files / pg_write_server_files), which no read-only check can prevent.
+    /// Off unless the user opts in for this connection.
+    public var mcpAllowPrivilegedRole: Bool
     public var createdAt: Date
     public var lastConnectedAt: Date?
 
@@ -56,7 +60,8 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
                 database: String = "postgres", sslMode: SSLMode = .prefer, sslNegotiation: SSLNegotiation = .postgres,
                 rootCertificatePath: String? = nil, color: ProfileColor = .none, isFavorite: Bool = false, ssh: SSHTunnelConfiguration? = nil,
                 allowCleartextPassword: Bool = false, poolingMode: PoolingMode = .auto, confirmMutations: Bool = false,
-                connectTimeout: Double = 10, mcpAccess: MCPAccess = .disabled, createdAt: Date = Date(), lastConnectedAt: Date? = nil) {
+                connectTimeout: Double = 10, mcpAccess: MCPAccess = .disabled, mcpAllowPrivilegedRole: Bool = false, createdAt: Date = Date(),
+                lastConnectedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.host = host
@@ -74,6 +79,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         self.confirmMutations = confirmMutations
         self.connectTimeout = connectTimeout
         self.mcpAccess = mcpAccess
+        self.mcpAllowPrivilegedRole = mcpAllowPrivilegedRole
         self.createdAt = createdAt
         self.lastConnectedAt = lastConnectedAt
     }
@@ -98,6 +104,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         confirmMutations = try container.decodeIfPresent(Bool.self, forKey: .confirmMutations) ?? false
         connectTimeout = try container.decodeIfPresent(Double.self, forKey: .connectTimeout) ?? 10
         mcpAccess = (try? container.decodeIfPresent(MCPAccess.self, forKey: .mcpAccess)) ?? .disabled
+        mcpAllowPrivilegedRole = (try? container.decodeIfPresent(Bool.self, forKey: .mcpAllowPrivilegedRole)) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
     }

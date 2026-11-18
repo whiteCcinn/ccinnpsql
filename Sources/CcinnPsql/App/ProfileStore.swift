@@ -67,6 +67,12 @@ final class ProfileStore {
         try? persist()
     }
 
+    func setMCPAllowPrivilegedRole(_ allowed: Bool, for profile: ConnectionProfile) {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[index].mcpAllowPrivilegedRole = allowed
+        try? persist()
+    }
+
     func toggleFavorite(_ profile: ConnectionProfile) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         profiles[index].isFavorite.toggle()

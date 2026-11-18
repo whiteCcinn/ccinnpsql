@@ -29,6 +29,56 @@ public enum SQLRedactor {
         return String(decoding: units, as: UTF16.self)
     }
 
+    /// Other sessions' SQL as the MCP tools return it: every string and numeric literal becomes `?` (digest style) and
+    /// comments are removed, so no literal of another session reaches the AI (a secret is not always next to PASSWORD).
+    /// Literals are taken from both readings of standard_conforming_strings, so a backslash before a quote cannot end a
+    /// literal early and leak its rest. Parameters (`$1`), names and keywords stay.
+    public static func digest(_ sql: String) -> String {
+        let units = Array(sql.utf16)
+        var literals: [Range<Int>] = []
+        var comments: [Range<Int>] = []
+        for syntax in [SQLLexer.Syntax.editor, SQLLexer.Syntax.editor.with(standardConformingStrings: false)] {
+            for token in SQLLexer(sql, syntax: syntax).tokens() {
+                switch token.kind {
+                case .string, .number: literals.append(token.range)
+                case .comment: comments.append(token.range)
+                default: break
+                }
+            }
+        }
+        let literalSpans = merged(literals)
+        // A comment that overlaps a literal of the other reading is part of that literal.
+        let commentSpans = merged(comments).filter { comment in !literalSpans.contains { $0.overlaps(comment) } }
+        let spans = (literalSpans.map { ($0, true) } + commentSpans.map { ($0, false) }).sorted { $0.0.lowerBound < $1.0.lowerBound }
+        var output: [UInt16] = []
+        output.reserveCapacity(units.count)
+        var cursor = 0
+        for (span, isLiteral) in spans where span.lowerBound >= cursor {
+            output.append(contentsOf: units[cursor..<span.lowerBound])
+            if isLiteral {
+                output.append(0x3F) // ?
+            } else if span.upperBound >= units.count || [0x20, 0x09, 0x0A, 0x0D].contains(units[span.upperBound]) {
+                while let last = output.last, last == 0x20 || last == 0x09 { output.removeLast() }
+            }
+            cursor = span.upperBound
+        }
+        if cursor < units.count { output.append(contentsOf: units[cursor...]) }
+        return String(decoding: output, as: UTF16.self)
+    }
+
+    /// Overlapping or touching ranges joined, in order.
+    private static func merged(_ ranges: [Range<Int>]) -> [Range<Int>] {
+        var result: [Range<Int>] = []
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = result.last, range.lowerBound <= last.upperBound {
+                result[result.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                result.append(range)
+            }
+        }
+        return result
+    }
+
     static func isSecretLiteral(at index: Int, tokens: [SQLToken], lexer: SQLLexer) -> Bool {
         func word(_ offset: Int) -> String? {
             let position = index + offset

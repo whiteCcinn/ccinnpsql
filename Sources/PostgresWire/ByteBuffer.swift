@@ -10,6 +10,9 @@ public enum PostgresWireError: Error, Sendable, Equatable, CustomStringConvertib
     case oversized(Int)
     /// Authentication could not proceed (bad server data, unsupported mechanism, failed verification).
     case authentication(String)
+    /// Text for a protocol string contains a NUL character, which the protocol cannot carry. Never stripped: the server
+    /// would receive different text than the app checked and showed.
+    case nulCharacter
 
     public var description: String {
         switch self {
@@ -17,6 +20,7 @@ public enum PostgresWireError: Error, Sendable, Equatable, CustomStringConvertib
         case let .invalid(what): "Invalid protocol message (\(what))"
         case let .oversized(size): "Protocol message of \(size) bytes exceeds the limit"
         case let .authentication(message): message
+        case .nulCharacter: "The text contains a NUL character, which PostgreSQL cannot receive; nothing was sent"
         }
     }
 }
@@ -124,9 +128,11 @@ public struct ByteWriter: Sendable {
 
     public mutating func writeBytes<S: Sequence>(_ data: S) where S.Element == UInt8 { bytes.append(contentsOf: data) }
 
-    /// Writes `text` with NUL bytes removed (they cannot be represented) and a terminating NUL.
-    public mutating func writeCString(_ text: String) {
-        for byte in text.utf8 where byte != 0 { bytes.append(byte) }
+    /// Writes `text` and a terminating NUL. Text containing a NUL cannot be represented and is refused, never altered.
+    public mutating func writeCString(_ text: String) throws(PostgresWireError) {
+        let utf8 = text.utf8
+        guard !utf8.contains(0) else { throw .nulCharacter }
+        bytes.append(contentsOf: utf8)
         bytes.append(0)
     }
 

@@ -86,8 +86,8 @@ public final class PostgresListener: Sendable {
         try await command(Self.notifyMessage(channel: channelName, payload: payload))
     }
 
-    static func notifyMessage(channel: String, payload: String) -> [UInt8] {
-        FrontendMessage.parse(statement: "", query: "SELECT pg_notify($1, $2)")
+    static func notifyMessage(channel: String, payload: String) throws -> [UInt8] {
+        try FrontendMessage.parse(statement: "", query: "SELECT pg_notify($1, $2)")
             + FrontendMessage.bind(portal: "", statement: "", parameters: [.text(channel), .text(payload)], resultFormats: [])
             + FrontendMessage.execute(portal: "", maxRows: 0)
             + FrontendMessage.sync

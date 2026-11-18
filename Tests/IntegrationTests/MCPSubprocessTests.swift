@@ -94,7 +94,10 @@ final class MCPProcess: @unchecked Sendable {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccinnpsql-mcp-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let profile = ConnectionProfile(name: "IT \(version)", host: "127.0.0.1", port: IT.port(version), username: "trust_user", database: "ccinn",
-                                        sslMode: .prefer, connectTimeout: 30, mcpAccess: .readOnly)
+                                        sslMode: .prefer, connectTimeout: 30, mcpAccess: .readOnly,
+                                        // trust_user is a pg_monitor member in the test containers (activity checks), which read-only
+                                        // access refuses by default; the opt-in also travels through the profile file to the subprocess.
+                                        mcpAllowPrivilegedRole: true)
         try ProfileRepository(directory: directory, secrets: InMemorySecretStore()).save([profile])
 
         process.executableURL = Self.binary
