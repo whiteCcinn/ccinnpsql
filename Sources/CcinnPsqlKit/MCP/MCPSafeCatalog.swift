@@ -33,11 +33,16 @@ enum MCPSafeCatalog {
         let needle = filter?.lowercased()
         let settings = records.compactMap { row -> JSONValue? in
             guard let name = row.raw("name"), isBuiltIn(name), needle.map({ name.lowercased().contains($0) }) ?? true else { return nil }
-            return .object([
-                "name": .string(name), "setting": JSONValue(row.string("setting")), "unit": JSONValue(row.text("unit")),
-                "category": JSONValue(row.text("category")), "short_desc": JSONValue(row.text("short_desc")),
-                "source": JSONValue(row.text("source")), "pending_restart": .bool(row.bool("pending_restart") ?? false),
-            ].filter { $0.value != .null })
+            // Built field by field: one large mixed literal exceeds older compilers' type-checking budget (Swift 6.2).
+            var fields: [String: JSONValue] = [:]
+            fields["name"] = .string(name)
+            fields["setting"] = JSONValue(row.string("setting"))
+            fields["unit"] = JSONValue(row.text("unit"))
+            fields["category"] = JSONValue(row.text("category"))
+            fields["short_desc"] = JSONValue(row.text("short_desc"))
+            fields["source"] = JSONValue(row.text("source"))
+            fields["pending_restart"] = .bool(row.bool("pending_restart") ?? false)
+            return .object(fields.filter { $0.value != .null })
         }
         return ["settings": .array(settings), "count": .int(Int64(settings.count)),
                 "note": "Built-in parameters only: custom parameters (names with a dot) can hold secrets and are never listed."]
@@ -50,13 +55,19 @@ enum MCPSafeCatalog {
     static func roles(_ records: [Record]) -> JSONValue {
         let roles = records.compactMap { row -> JSONValue? in
             guard let name = row.raw("rolname") else { return nil }
-            return .object([
-                "name": .string(name), "superuser": .bool(row.bool("rolsuper") ?? false), "inherit": .bool(row.bool("rolinherit") ?? true),
-                "create_role": .bool(row.bool("rolcreaterole") ?? false),
-                "create_db": .bool(row.bool("rolcreatedb") ?? false), "can_login": .bool(row.bool("rolcanlogin") ?? false),
-                "replication": .bool(row.bool("rolreplication") ?? false), "bypass_rls": .bool(row.bool("rolbypassrls") ?? false),
-                "connection_limit": JSONValue(row.int("rolconnlimit")), "member_of": .array(row.array("member_of").map { .string($0) }),
-            ].filter { $0.value != .null })
+            var fields: [String: JSONValue] = [:]
+            fields["name"] = .string(name)
+            fields["superuser"] = .bool(row.bool("rolsuper") ?? false)
+            fields["inherit"] = .bool(row.bool("rolinherit") ?? true)
+            fields["create_role"] = .bool(row.bool("rolcreaterole") ?? false)
+            fields["create_db"] = .bool(row.bool("rolcreatedb") ?? false)
+            fields["can_login"] = .bool(row.bool("rolcanlogin") ?? false)
+            fields["replication"] = .bool(row.bool("rolreplication") ?? false)
+            fields["bypass_rls"] = .bool(row.bool("rolbypassrls") ?? false)
+            fields["connection_limit"] = JSONValue(row.int("rolconnlimit"))
+            let memberOf: [JSONValue] = row.array("member_of").map { JSONValue.string($0) }
+            fields["member_of"] = .array(memberOf)
+            return .object(fields.filter { $0.value != .null })
         }
         return ["roles": .array(Array(roles.prefix(maxRoles))), "count": .int(Int64(roles.count)), "truncated": .bool(roles.count > maxRoles)]
     }
