@@ -500,10 +500,14 @@ private struct OutcomeView: View {
                 .help("Show as grid, chart or plan")
                 Menu {
                     Section("Copy") {
-                        ForEach(ExportFormat.allCases) { format in Button(format.displayName) { model.copy(rowSet, as: format) } }
+                        ForEach(ExportFormat.allCases.filter(\.isCopyable)) { format in
+                            Button(format.displayName) { model.copy(rowSet, sql: outcome.executedSQL, as: format) }
+                        }
                     }
                     Section("Export to file") {
-                        ForEach(ExportFormat.allCases) { format in Button("\(format.displayName)…") { model.export(rowSet, as: format) } }
+                        ForEach(ExportFormat.allCases) { format in
+                            Button("\(format.displayName)…") { model.export(rowSet, sql: outcome.executedSQL, as: format) }
+                        }
                     }
                     if outcome.kind == .query {
                         Divider()
@@ -553,7 +557,7 @@ private struct OutcomeView: View {
                 switch outcome.viewMode {
                 case .grid, .plan:
                     ResultGrid(resultID: outcome.id, columns: rowSet.columns, rows: rowSet.rows,
-                               insertTableName: model.sourceTableName(rowSet) ?? "exported",
+                               insertTableName: model.insertTarget(rowSet, sql: outcome.executedSQL),
                                onInspect: { model.inspected = $0 })
                 case .chart:
                     if outcome.chart == nil, let state = ChartState(result: rowSet) {

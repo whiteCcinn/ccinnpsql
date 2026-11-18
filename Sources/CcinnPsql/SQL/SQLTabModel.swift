@@ -615,27 +615,63 @@ final class SQLTabModel: SQLFormatHost {
 
     // MARK: Export
 
-    func export(_ result: ResultSet, as format: ExportFormat) {
+    func export(_ result: ResultSet, sql: String, as format: ExportFormat) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(title.replacingOccurrences(of: " ", with: "_")).\(format.fileExtension)"
+        panel.nameFieldStringValue = "\(exportBaseName(result, sql: sql)).\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await write(result, sql: sql, as: format, to: url) }
+    }
+
+    /// Writes the result to `url` off the main actor and reports the outcome in a toast.
+    func write(_ result: ResultSet, sql: String, as format: ExportFormat, to url: URL) async {
         let (columns, rows) = (result.columns, result.rows)
-        let table = sourceTableName(result) ?? "exported"
-        Task {
-            do {
-                try await Task.detached(priority: .userInitiated) {
-                    try ResultExport.write(format, to: url, columns: columns, rows: rows, table: table)
-                }.value
-                workspace.showToast("Exported \(Format.count(rows.count)) rows")
-            } catch {
-                workspace.showToast("Export failed: \(error.localizedDescription)", isError: true)
+        let table = insertTarget(result, sql: sql)
+        let sheetName = exportBaseName(result, sql: sql)
+        do {
+            let summary = try await Task.detached(priority: .userInitiated) {
+                try ResultExport.write(format, to: url, columns: columns, rows: rows, table: table, sheetName: sheetName)
+            }.value
+            var message = "Exported \(Format.count(summary.rows)) rows to \(url.lastPathComponent)"
+            if summary.truncatedCells > 0 {
+                message += "; \(Format.count(summary.truncatedCells)) values cut to Excel's 32,767 characters"
             }
+            workspace.showToast(message)
+        } catch {
+            workspace.showToast("Export failed: \(error.localizedDescription)", isError: true)
         }
     }
 
-    func copy(_ result: ResultSet, as format: ExportFormat) {
+    /// Automated checks (`--export excel --export-to /path/result.xlsx` with `--auto-run`): waits for the run, then
+    /// writes the selected result exactly as Export does.
+    func runAutomatedExport(format raw: String, to path: String) async {
+        guard let format = ExportFormat(rawValue: raw) else { return }
+        for _ in 0..<600 where isRunning || outcomes.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+        guard let outcome = selectedOutcome, let rowSet = outcome.rowSet else { return }
+        await write(rowSet, sql: outcome.executedSQL, as: format, to: URL(fileURLWithPath: path))
+    }
+
+    /// Where INSERTs for this result go: the relation the catalog names for the columns' table, else the one a plain
+    /// single-table SELECT reads, else a placeholder.
+    func insertTarget(_ result: ResultSet, sql: String?) -> String {
+        sourceTableName(result) ?? sql.flatMap(ResultExport.singleSourceTable) ?? "exported"
+    }
+
+    /// The source relation's name (unquoted, without schema) or the tab's title; safe as a file name.
+    func exportBaseName(_ result: ResultSet, sql: String?) -> String {
+        let target = insertTarget(result, sql: sql)
+        var name = target == "exported" ? title : String(target.split(separator: ".").last ?? Substring(title))
+        name = name.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        let unsafe: Set<Character> = ["/", ":", "\\", " "]
+        let cleaned = String(name.map { (character: Character) -> Character in
+            unsafe.contains(character) || character.isNewline ? "_" : character
+        })
+        return cleaned.isEmpty ? "result" : cleaned
+    }
+
+    func copy(_ result: ResultSet, sql: String, as format: ExportFormat) {
+        guard format.isCopyable else { return }
         let (columns, rows) = (result.columns, result.rows)
-        let table = sourceTableName(result) ?? "exported"
+        let table = insertTarget(result, sql: sql)
         Task {
             let text = await Task.detached(priority: .userInitiated) { ResultExport.render(format, columns: columns, rows: rows, table: table) }.value
             Pasteboard.copy(text)

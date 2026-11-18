@@ -241,6 +241,9 @@ enum LaunchArguments {
                         for _ in 0..<100 where model.isRunning || model.outcomes.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
                         model.selectedOutcome?.viewMode = mode
                     }
+                    if let format = value("--export"), let path = value("--export-to") {
+                        await model.runAutomatedExport(format: format, to: path)
+                    }
                 }
                 if let raw = value("--operations"),
                    let section = OperationsModel.Section.allCases.first(where: { $0.rawValue.lowercased().hasPrefix(raw.lowercased()) }) {
