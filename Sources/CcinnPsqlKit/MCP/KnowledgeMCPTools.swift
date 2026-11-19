@@ -266,8 +266,7 @@ extension PostgresMCPTools {
     }
 
     func verify(_ explanation: TableExplanation, key: DatabaseKey, client: PostgresClient) async throws -> JSONValue {
-        let found = try await client.columnsByTable([(schema: key.database, table: explanation.table)], database: key.catalog)
-        let live = found[(key.database + "." + explanation.table).lowercased()] ?? []
+        let live = try await client.knowledgeColumns(key.database, table: explanation.table, database: key.catalog)
         if live.isEmpty { return ["ok": false, "note": "The table is not on the server any more; call refresh_knowledge."] }
         let stored = explanation.columns.map { $0[0].lowercased() + " " + $0[1].lowercased() }
         let current = live.map { (column: (name: String, type: String)) -> String in column.name.lowercased() + " " + column.type.lowercased() }

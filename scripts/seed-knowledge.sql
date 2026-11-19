@@ -54,3 +54,22 @@ BEGIN
     END IF;
 END
 $$;
+
+-- A column whose type lives in this schema, and a view reading another schema's table: their printed names must not
+-- depend on the reading session's search_path.
+CREATE TYPE kb_demo.app_status AS ENUM ('live', 'paused');
+ALTER TABLE kb_demo.app ADD COLUMN status kb_demo.app_status;
+CREATE VIEW kb_demo.v_publisher_country AS
+SELECT p.name, c.name AS country FROM kb_demo.publisher p JOIN kb_ref.country c ON p.country_code = c.code;
+
+-- PostgreSQL 12+: a foreign key to a partitioned table, which the catalog also stores once per partition.
+DO $$
+BEGIN
+    IF current_setting('server_version_num')::int >= 120000 THEN
+        EXECUTE 'CREATE TABLE kb_demo.account (id bigint PRIMARY KEY) PARTITION BY HASH (id)';
+        EXECUTE 'CREATE TABLE kb_demo.account_p0 PARTITION OF kb_demo.account FOR VALUES WITH (MODULUS 2, REMAINDER 0)';
+        EXECUTE 'CREATE TABLE kb_demo.account_p1 PARTITION OF kb_demo.account FOR VALUES WITH (MODULUS 2, REMAINDER 1)';
+        EXECUTE 'ALTER TABLE kb_demo.app ADD COLUMN account_id bigint REFERENCES kb_demo.account (id)';
+    END IF;
+END
+$$;

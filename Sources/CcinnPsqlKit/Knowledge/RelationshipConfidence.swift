@@ -36,6 +36,8 @@ public enum RelationshipConfidence {
     public static func score(_ relationship: Relationship, columnType: (Relationship.End, String) -> String?) -> Int {
         if let verdict = userVerdict(relationship.evidence) { return verdict == .assert ? 100 : 0 }
         if relationship.status == .rejected { return 0 }
+        // PostgreSQL enforces and has validated this foreign key: every row satisfies it, whatever an AI says.
+        if relationship.evidence.contains(where: { $0.source == .declared && $0.verdict == .assert && ($0.score ?? 0) >= 100 }) { return 100 }
         let supporting = relationship.evidence.filter { $0.verdict == .assert }
         let opposing = relationship.evidence.filter { $0.verdict == .reject }
         guard !supporting.isEmpty else { return 0 }

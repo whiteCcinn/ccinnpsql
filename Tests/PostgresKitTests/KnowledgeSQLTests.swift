@@ -18,6 +18,17 @@ struct KnowledgeSQLTests {
         #expect(KnowledgeSQL.constraints(ServerVersion(major: 17, minor: 0)).contains("true AS enforced"))
     }
 
+    @Test func perPartitionCopiesOfAForeignKeyAreLeftOut() {
+        #expect(KnowledgeSQL.constraints(ServerVersion(major: 12, minor: 0)).contains("k.conparentid = 0"))
+        #expect(!KnowledgeSQL.constraints(ServerVersion(major: 10, minor: 0)).contains("conparentid"), "conparentid exists from 11")
+    }
+
+    @Test func extractionRunsReadOnlyWithOnlyThePostgresCatalogOnThePath() {
+        #expect(KnowledgeSQL.catalogTransaction.contains("BEGIN TRANSACTION READ ONLY"))
+        #expect(KnowledgeSQL.catalogTransaction.contains("SET LOCAL search_path = pg_catalog"),
+                "names print schema-qualified for every profile, and unqualified functions resolve only in pg_catalog")
+    }
+
     @Test func everyStatementTakesTheSchemaAsAParameter() {
         for sql in [KnowledgeSQL.relations(ServerVersion(major: 16, minor: 0)), KnowledgeSQL.columns(ServerVersion(major: 16, minor: 0)),
                     KnowledgeSQL.constraints(ServerVersion(major: 16, minor: 0)), KnowledgeSQL.visibleRelations] {

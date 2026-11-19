@@ -115,6 +115,8 @@ public enum KnowledgeSQL {
     public static func constraints(_ version: ServerVersion) -> String {
         let enforced = version.atLeast(18) ? "k.conenforced" : "true"
         let notPartition = version.atLeast(10) ? "AND NOT c.relispartition" : ""
+        // A foreign key to a partitioned table has a copy per partition (PostgreSQL 12+); only the parent constraint counts.
+        let notInherited = version.atLeast(11) ? "AND k.conparentid = 0" : ""
         return """
         SELECT c.relname AS table_name, k.contype::text AS kind, k.convalidated AS validated, \(enforced) AS enforced,
                ARRAY(SELECT a.attname FROM unnest(k.conkey) WITH ORDINALITY AS u(attnum, position)
@@ -127,8 +129,26 @@ public enum KnowledgeSQL {
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         LEFT JOIN pg_catalog.pg_class r ON r.oid = k.confrelid
         LEFT JOIN pg_catalog.pg_namespace rn ON rn.oid = r.relnamespace
-        WHERE n.nspname = $1 AND k.contype IN ('p','u','f') \(notPartition)
+        WHERE n.nspname = $1 AND k.contype IN ('p','u','f') \(notPartition) \(notInherited)
         ORDER BY c.relname, k.conname
+        """
+    }
+
+    /// Extraction runs in this transaction: read-only, and with only `pg_catalog` on the search path, so `pg_get_viewdef`
+    /// and `format_type` print every other schema's names qualified (the same text for every profile, whatever its own
+    /// search path), and an unqualified function can only be PostgreSQL's own.
+    public static let catalogTransaction = "BEGIN TRANSACTION READ ONLY; SET LOCAL search_path = pg_catalog; "
+        + "SET LOCAL statement_timeout = \(Int(PostgresClient.metadataTimeout * 1000)); SET LOCAL lock_timeout = \(Int(PostgresClient.metadataLockTimeout * 1000))"
+
+    /// The columns of one table, matched exactly (quoted mixed-case names stay apart).
+    public static func tableColumns(_ version: ServerVersion) -> String {
+        """
+        SELECT a.attname AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS type
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attnum
         """
     }
 
@@ -202,14 +222,41 @@ extension PostgresClient {
     /// The structure of `schema` in `database` (the connection's database when nil). Metadata only; no rows are read.
     public func knowledgeSchema(_ schema: String, database: String? = nil) async throws -> KnowledgeSchemaRows {
         let version = serverInfo.version
-        async let relationRows = records(KnowledgeSQL.relations(version), [.text(schema)], database: database)
-        async let columnRows = records(KnowledgeSQL.columns(version), [.text(schema)], database: database)
-        async let constraintRows = records(KnowledgeSQL.constraints(version), [.text(schema)], database: database)
-        let relations = try await relationRows.compactMap(KnowledgeSQL.relation)
-        var columns: [String: [KnowledgeColumnRow]] = [:]
-        for column in try await columnRows.compactMap(KnowledgeSQL.column) { columns[column.table, default: []].append(column) }
-        let constraints = try await constraintRows.compactMap(KnowledgeSQL.constraint)
-        return KnowledgeSchemaRows(relations: relations, columns: columns, constraints: constraints)
+        return try await withCatalogTransaction(database: database) { (connection: PostgresConnection) -> KnowledgeSchemaRows in
+            let relationRows = try await connection.extendedQuery(KnowledgeSQL.relations(version), parameters: [.text(schema)], limits: .metadata).records
+            let columnRows = try await connection.extendedQuery(KnowledgeSQL.columns(version), parameters: [.text(schema)], limits: .metadata).records
+            let constraintRows = try await connection.extendedQuery(KnowledgeSQL.constraints(version), parameters: [.text(schema)], limits: .metadata).records
+            var columns: [String: [KnowledgeColumnRow]] = [:]
+            for column in columnRows.compactMap(KnowledgeSQL.column) { columns[column.table, default: []].append(column) }
+            return KnowledgeSchemaRows(relations: relationRows.compactMap(KnowledgeSQL.relation), columns: columns,
+                                       constraints: constraintRows.compactMap(KnowledgeSQL.constraint))
+        }
+    }
+
+    /// Name and type of each column of `schema.table`, as extraction prints them; empty when the table is gone.
+    public func knowledgeColumns(_ schema: String, table: String, database: String? = nil) async throws -> [(name: String, type: String)] {
+        let version = serverInfo.version
+        return try await withCatalogTransaction(database: database) { (connection: PostgresConnection) -> [(name: String, type: String)] in
+            let rows = try await connection.extendedQuery(KnowledgeSQL.tableColumns(version), parameters: [.text(schema), .text(table)], limits: .metadata).records
+            return rows.compactMap { (row: Record) -> (name: String, type: String)? in row.raw("name").map { ($0, row.text("type") ?? "") } }
+        }
+    }
+
+    /// Runs `body` on one pooled connection inside `KnowledgeSQL.catalogTransaction`, rolled back afterwards.
+    func withCatalogTransaction<T: Sendable>(database: String?, _ body: (PostgresConnection) async throws -> T) async throws -> T {
+        let prefix = routingPrefix
+        return try await withConnection(database: database) { (connection: PostgresConnection) -> T in
+            _ = try await connection.simpleQuery(prefix + KnowledgeSQL.catalogTransaction, limits: .metadata)
+            do {
+                let result = try await body(connection)
+                _ = try await connection.simpleQuery(prefix + "ROLLBACK", limits: .metadata)
+                return result
+            } catch {
+                // The pool does not reuse a connection left inside a transaction, so a failed rollback only costs a reconnect.
+                _ = try? await connection.simpleQuery(prefix + "ROLLBACK", limits: .metadata)
+                throw error
+            }
+        }
     }
 
     /// Names of the relations of `schema` the current role may read.

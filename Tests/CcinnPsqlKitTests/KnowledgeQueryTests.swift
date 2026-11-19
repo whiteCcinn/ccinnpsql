@@ -121,7 +121,8 @@ struct JoinPathTests {
         #expect(best.steps.map(\.join) == ["app", "publisher"])
         #expect(best.steps.map(\.on) == ["report_adx_hour.app_id = app.id", "app.publisher_id = publisher.id"])
         #expect(best.minConfidence == 60)
-        #expect(best.sql == "FROM report_adx_hour\nJOIN app ON report_adx_hour.app_id = app.id\nJOIN publisher ON app.publisher_id = publisher.id")
+        #expect(best.sql == "FROM adx.report_adx_hour\nJOIN adx.app ON report_adx_hour.app_id = app.id\nJOIN adx.publisher ON app.publisher_id = publisher.id",
+                "tables are schema-qualified, so run_query never resolves them through another schema on the search path")
         #expect(result.excluded.belowMinimum == 1, "the 20% grain guess is not a path")
         #expect(result.excluded.stale == 1)
     }

@@ -350,3 +350,20 @@ struct KnowledgeInferenceConfidenceTests {
         #expect(RelationshipConfidence.confidence(of: naming(-5)) == 0)
     }
 }
+
+@Suite("Knowledge inference: enforced foreign keys are facts")
+struct KnowledgeEnforcedKeyTests {
+    private typealias F = KnowledgeInferenceFixtures
+
+    @Test func onlyTheUserCanRejectAForeignKeyPostgresEnforces() {
+        let rejections = (0..<20).map { (index: Int) -> Evidence in Evidence(source: .code, verdict: .reject, path: "dao\(index).go", by: "ai:x", at: F.now) }
+        var enforced = Relationship(from: .init(table: "a", columns: ["b_id"]), to: .init(table: "b", columns: ["id"]), kind: .manyToOne,
+                                    evidence: [Evidence(source: .declared, score: 100, at: F.now)] + rejections)
+        #expect(RelationshipConfidence.score(enforced) == 100, "an AI or a prompt-injected comment cannot argue with the server")
+        var notValid = enforced
+        notValid.evidence[0] = Evidence(source: .declared, score: 95, at: F.now)
+        #expect(RelationshipConfidence.score(notValid) < 95, "a NOT VALID key may really be broken, so doubt still counts")
+        enforced.evidence.append(Evidence(source: .user, verdict: .reject, by: "user", at: F.now))
+        #expect(RelationshipConfidence.score(enforced) == 0, "the user has the last word")
+    }
+}

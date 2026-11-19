@@ -78,7 +78,7 @@ public enum JoinPathFinder {
             }
             if complete, combined.count - 1 <= hops * max(1, waypoints.count - 1) { nodePaths = [combined] }
         }
-        let paths = nodePaths.map { describe($0, graph: graph) }
+        let paths = nodePaths.map { describe($0, graph: graph, schema: knowledge.key.database) }
         var nearest: Nearest?
         if paths.isEmpty {
             nearest = Nearest(from: neighbourhood(graph, of: from), to: neighbourhood(graph, of: to))
@@ -206,9 +206,15 @@ public enum JoinPathFinder {
 
     // MARK: Description
 
-    static func describe(_ nodes: [String], graph: Graph) -> Path {
+    /// `schema` qualifies this schema's tables in the SQL skeleton, so the query never resolves them through another
+    /// schema on the search path.
+    static func describe(_ nodes: [String], graph: Graph, schema: String? = nil) -> Path {
+        func item(_ node: String) -> String {
+            guard let schema, !node.contains(".") else { return quoted(node) }
+            return CompletionEngine.quoteIfNeeded(schema) + "." + CompletionEngine.quoteIfNeeded(node)
+        }
         var steps: [Step] = []
-        var sql = "FROM " + quoted(nodes[0])
+        var sql = "FROM " + item(nodes[0])
         for index in 0..<(nodes.count - 1) {
             let origin = nodes[index]
             let target = nodes[index + 1]
@@ -216,7 +222,7 @@ public enum JoinPathFinder {
             let on = KnowledgeRules.condition(edge.relationship, leftFirst: origin)
             steps.append(Step(join: target, on: on, cardinality: KnowledgeRules.cardinality(edge.relationship, from: origin), confidence: edge.confidence,
                               sources: KnowledgeRules.sources(edge.relationship)))
-            sql += "\nJOIN " + quoted(target) + " ON " + quotedCondition(edge.relationship, leftFirst: origin)
+            sql += "\nJOIN " + item(target) + " ON " + quotedCondition(edge.relationship, leftFirst: origin)
         }
         return Path(minConfidence: steps.map(\.confidence).min() ?? 0, steps: steps, sql: sql, warnings: warnings(steps, nodes: nodes))
     }

@@ -16,7 +16,9 @@ struct KnowledgeIntegrationTests {
         defer { Task { await client.close() } }
         let schema = try await KnowledgeExtractor.extract(schema: "kb_demo", database: nil, from: client)
         let names = schema.tables.map(\.name)
-        #expect(Set(names) == ["publisher", "app", "dsp", "dsp_budget", "report_adx_hour", "v_dsp_report", "mv_app_day"], "partitions fold into their parent")
+        var expected: Set<String> = ["publisher", "app", "dsp", "dsp_budget", "report_adx_hour", "v_dsp_report", "v_publisher_country", "mv_app_day"]
+        if client.serverInfo.version.atLeast(12) { expected.insert("account") }
+        #expect(Set(names) == expected, "partitions fold into their parent")
         let report = try #require(schema.tables.first { $0.name == "report_adx_hour" })
         #expect(report.kind == .table && report.keys.primary == ["dt", "hour", "dsp_id", "app_id"] && report.keys.partition == ["dt"])
         #expect(report.comment == "ADX hourly report" && report.columns.first { $0.name == "dsp_id" }?.comment == "DSP")
@@ -35,7 +37,40 @@ struct KnowledgeIntegrationTests {
         } else {
             #expect(keys["dsp_budget.dsp_id"] == nil)
         }
+        if client.serverInfo.version.atLeast(12) {
+            #expect(schema.foreignKeys.filter { $0.table == "app" && $0.columns == ["account_id"] }.map(\.referencedTable) == ["account"],
+                    "one relationship to the partitioned table, none to its partitions")
+        }
         #expect(schema.serverVersion?.contains(version) == true)
+    }
+
+    // A role whose search path holds the schemas: names and types still print qualified, so lineage and fingerprints
+    // do not depend on who refreshed.
+    @Test(arguments: IT.versions)
+    func catalogTextDoesNotDependOnTheSessionsSearchPath(version: String) async throws {
+        let admin = try await IT.client(version)
+        defer { Task { await admin.close() } }
+        _ = try await admin.records("ALTER ROLE trust_user IN DATABASE ccinn SET search_path = kb_demo, kb_ref, public")
+        do {
+            let reader = try await PostgresClient.connect(IT.configuration(version, user: "trust_user", password: "", sslMode: .disable), poolSize: 1)
+            let fromReader = try await KnowledgeExtractor.extract(schema: "kb_demo", database: nil, from: reader)
+            await reader.close()
+            let fromAdmin = try await KnowledgeExtractor.extract(schema: "kb_demo", database: nil, from: admin)
+            let app = try #require(fromReader.tables.first { $0.name == "app" })
+            #expect(app.columns.first { $0.name == "status" }?.type == "kb_demo.app_status")
+            let view = try #require(fromReader.tables.first { $0.name == "v_publisher_country" })
+            let lineage = KnowledgeRefresher.tableFacts(view, database: "kb_demo", previous: nil, now: Date()).lineage
+            #expect(Set(lineage) == [TableReference(database: "kb_ref", table: "country"), TableReference(table: "publisher")], "another schema keeps its name")
+            for table in fromReader.tables {
+                let other = try #require(fromAdmin.tables.first { $0.name == table.name })
+                #expect(KnowledgeRefresher.tableFacts(table, database: "kb_demo", previous: nil, now: Date()).fingerprint
+                        == KnowledgeRefresher.tableFacts(other, database: "kb_demo", previous: nil, now: Date()).fingerprint, "\(table.name)")
+            }
+        } catch {
+            _ = try? await admin.records("ALTER ROLE trust_user IN DATABASE ccinn RESET search_path")
+            throw error
+        }
+        _ = try await admin.records("ALTER ROLE trust_user IN DATABASE ccinn RESET search_path")
     }
 
     @Test(arguments: IT.versions)
@@ -49,7 +84,7 @@ struct KnowledgeIntegrationTests {
                                          durationMilliseconds: 3)]
         let report = try await KnowledgeService.refresh(key, source: client, store: store, history: history, infer: KnowledgeInference.machineRelationships,
                                                         now: Date())
-        #expect(report.tables.total == 7)
+        #expect(report.tables.total == (client.serverInfo.version.atLeast(12) ? 9 : 8))
         let knowledge = try #require(try store.database(key))
         func relationship(_ from: String, _ to: String) -> Relationship? {
             knowledge.relationships.first { "\($0.from.table).\($0.from.columns.joined(separator: ","))" == from
