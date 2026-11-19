@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-19
+
 ### Added
 
 - **A knowledge base the AI builds once and every session reuses**, one per schema, shared by every connection that reaches the server:
@@ -145,7 +147,8 @@ First public release.
 - SQL workbench: PostgreSQL highlighting, context-aware completion, run current / selection / all / as script, automatic LIMIT, exact error underline with SQLSTATE, detail and hint, notices, transaction state, cancellation, history, CSV/TSV/JSON/Markdown/INSERT export and COPY export, charts, visual EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON), and a LISTEN/NOTIFY panel.
 - MCP server (`CcinnPsql mcp`) so AI clients such as Claude Code, Codex and Claude Desktop can list connections, inspect servers, schemas, tables, statistics, activity, replication and top statements, and run read-only queries (checked by the app, including SQL inside string literals, executed in a READ ONLY transaction, with the session reset after every call) on connections the user opted in; read & write access is opt-in per connection, and every call is audited with secrets redacted.
 
-[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/whiteCcinn/ccinnpsql/compare/v1.3.0...v1.3.1
