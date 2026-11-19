@@ -120,6 +120,8 @@ public enum SQLTableReferences {
             var parsingList = true
             while parsingList, index < end {
                 parsingList = false
+                // `FROM (a JOIN b ON …)`, as pg_get_viewdef prints every join: the tables inside belong to this list.
+                while index + 1 < end, isPunctuation(tokens[index], "(", lexer), !["SELECT", "WITH", "VALUES"].contains(words[index + 1]) { index += 1 }
                 while index < end, fromItemPrefixes.contains(words[index]) { index += 1 }
                 guard index < end else { break }
                 if isPunctuation(tokens[index], "(", lexer) {
