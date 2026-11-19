@@ -31,7 +31,7 @@ struct KnowledgeSQLTests {
 
     @Test func everyStatementTakesTheSchemaAsAParameter() {
         for sql in [KnowledgeSQL.relations(ServerVersion(major: 16, minor: 0)), KnowledgeSQL.columns(ServerVersion(major: 16, minor: 0)),
-                    KnowledgeSQL.constraints(ServerVersion(major: 16, minor: 0)), KnowledgeSQL.visibleRelations] {
+                    KnowledgeSQL.constraints(ServerVersion(major: 16, minor: 0)), KnowledgeSQL.readableColumns] {
             #expect(sql.contains("n.nspname = $1"), "the schema is bound, never spliced")
         }
     }

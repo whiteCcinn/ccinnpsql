@@ -152,11 +152,22 @@ public enum KnowledgeSQL {
         """
     }
 
-    /// Relations of schema `$1` the current role may read (any column counts). Knowledge shown to an AI is limited to these.
-    public static let visibleRelations = """
-        SELECT c.relname AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    /// What the current role may read in schema `$1`: one row with a NULL `column_name` per relation it may read whole
+    /// (SELECT on the relation), and one row per column it may read in the others (column grants). A relation with one
+    /// readable column counts. Knowledge shown to an AI is limited to these; the catalog itself lists every column. Only
+    /// columns with an ACL of their own can carry a column grant, so the others are not checked one by one.
+    public static let readableColumns = """
+        SELECT c.relname AS name, NULL::pg_catalog.text AS column_name
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = $1 AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND c.relkind IN ('r','p','v','m','f')
-          AND (pg_catalog.has_table_privilege(c.oid, 'SELECT') OR pg_catalog.has_any_column_privilege(c.oid, 'SELECT'))
+          AND pg_catalog.has_table_privilege(c.oid, 'SELECT')
+        UNION ALL
+        SELECT c.relname AS name, a.attname::pg_catalog.text AS column_name
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        WHERE n.nspname = $1 AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND c.relkind IN ('r','p','v','m','f')
+          AND NOT pg_catalog.has_table_privilege(c.oid, 'SELECT')
+          AND a.attacl IS NOT NULL AND pg_catalog.has_column_privilege(c.oid, a.attnum, 'SELECT')
         """
 
     /// Schemas of the database the current role may use, without PostgreSQL's own.
@@ -259,9 +270,21 @@ extension PostgresClient {
         }
     }
 
-    /// Names of the relations of `schema` the current role may read.
-    public func knowledgeVisibleRelations(_ schema: String, database: String? = nil) async throws -> Set<String> {
-        Set(try await records(KnowledgeSQL.visibleRelations, [.text(schema)], database: database).compactMap { $0.raw("name") })
+    /// The relations of `schema` the current role may read: those it may read whole, and for the others (column grants)
+    /// the columns it may read, names exactly as stored.
+    public func knowledgeReadableColumns(_ schema: String, database: String? = nil) async throws
+        -> (wholeRelations: Set<String>, columns: [String: Set<String>]) {
+        var whole = Set<String>()
+        var columns: [String: Set<String>] = [:]
+        for row in try await records(KnowledgeSQL.readableColumns, [.text(schema)], database: database) {
+            guard let name = row.raw("name") else { continue }
+            if let column = row.raw("column_name") {
+                columns[name, default: []].insert(column)
+            } else {
+                whole.insert(name)
+            }
+        }
+        return (whole, columns)
     }
 
     /// Schemas of `database` the current role may use.

@@ -89,15 +89,16 @@ public enum KnowledgeService {
     public static func linkProject(path: String, to key: DatabaseKey, store: KnowledgeStore, home: URL, now: Date) throws -> String {
         let stored = try KnowledgeMCP.projectPath(path, home: home, isDirectory: isDirectory)
         let id = KnowledgeMCP.projectID(path: stored)
+        let expanded = KnowledgeMCP.expand(stored, home: home)
+        let remote = KnowledgeMCP.gitRemote(of: expanded) // outside the lock: other writers never wait on a checkout
         try store.updateIndex { index in
             if !index.databases.contains(where: { $0.key == key }) { index.databases.append(KnowledgeIndex.DatabaseEntry(key: key)) }
             if !index.clusters.contains(where: { $0.key == key.cluster || $0.aliases.contains(key.cluster) }) {
                 index.clusters.append(KnowledgeIndex.ClusterEntry(key: key.cluster))
             }
             if !index.projects.contains(where: { $0.id == id }) {
-                let expanded = KnowledgeMCP.expand(stored, home: home)
                 index.projects.append(KnowledgeIndex.Project(id: id, path: stored, name: URL(fileURLWithPath: expanded).lastPathComponent,
-                                                             gitRemote: KnowledgeMCP.gitRemote(of: expanded), addedAt: now, addedBy: "user"))
+                                                             gitRemote: remote, addedAt: now, addedBy: "user"))
             }
             if !index.links.contains(where: { $0.project == id && $0.database == key.fileID }) {
                 index.links.append(KnowledgeIndex.Link(project: id, database: key.fileID, addedAt: now, addedBy: "user"))
@@ -113,10 +114,11 @@ public enum KnowledgeService {
     /// Points a project at its new location (another Mac, a moved checkout); its links stay.
     public static func remapProject(id: String, to path: String, store: KnowledgeStore, home: URL) throws {
         let stored = try KnowledgeMCP.projectPath(path, home: home, isDirectory: isDirectory)
+        let remote = KnowledgeMCP.gitRemote(of: KnowledgeMCP.expand(stored, home: home)) // outside the lock
         try store.updateIndex { index in
             guard let position = index.projects.firstIndex(where: { $0.id == id }) else { throw Failure.unknownProject(id) }
             index.projects[position].path = stored
-            index.projects[position].gitRemote = KnowledgeMCP.gitRemote(of: KnowledgeMCP.expand(stored, home: home)) ?? index.projects[position].gitRemote
+            index.projects[position].gitRemote = remote ?? index.projects[position].gitRemote
         }
     }
 

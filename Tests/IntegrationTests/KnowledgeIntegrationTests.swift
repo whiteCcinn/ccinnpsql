@@ -116,9 +116,24 @@ struct KnowledgeIntegrationTests {
         _ = try await admin.records("GRANT USAGE ON SCHEMA kb_demo TO trust_user")
         _ = try await admin.records("GRANT SELECT ON kb_demo.dsp TO trust_user")
         _ = try await admin.records("GRANT SELECT (dt, hour) ON kb_demo.report_adx_hour TO trust_user")
-        let visible = try await KnowledgeMCP.liveVisibility(restricted, nil, "kb_demo")
-        #expect(visible == ["dsp", "report_adx_hour"], "a table with one readable column counts")
+        let visibility = try #require(try await KnowledgeMCP.liveVisibility(restricted, nil, "kb_demo"))
+        #expect(visibility.tables == ["dsp", "report_adx_hour"], "a table with one readable column counts")
+        #expect(visibility.columns["dsp"] == .some(nil), "SELECT on the table: every column")
+        #expect(visibility.contains("report_adx_hour", column: "dt") && visibility.contains("report_adx_hour", column: "hour"))
+        #expect(!visibility.contains("report_adx_hour", column: "revenue") && !visibility.contains("report_adx_hour", column: "dsp_id"),
+                "column grants are honoured: the catalog lists every column, the privileges do not")
         #expect(try await KnowledgeMCP.liveVisibility(restricted, nil, "pg_catalog") == nil)
+
+        // Knowledge an administrator built, as the restricted role's AI session sees it.
+        let store = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: store.directory) }
+        let key = DatabaseKey(cluster: ClusterKey(rawValue: "pg://127.0.0.1:\(IT.port(version))"), catalog: "ccinn", database: "kb_demo")
+        _ = try await KnowledgeService.refresh(key, source: admin, store: store, history: [], infer: KnowledgeInference.machineRelationships, now: Date())
+        let seen = KnowledgeMCP.filter(try #require(try store.database(key)), visibility: visibility)
+        #expect(seen.table(named: "report_adx_hour")?.columns.map(\.name) == ["dt", "hour"])
+        #expect(seen.table(named: "report_adx_hour")?.keys.primary.isEmpty == true, "the primary key names hidden columns")
+        #expect(!seen.relationships.contains { $0.from.table == "report_adx_hour" }, "its foreign keys start at hidden columns")
+        #expect(Set(seen.tables.map(\.name)) == ["dsp", "report_adx_hour"])
         _ = try await admin.records("REVOKE ALL ON ALL TABLES IN SCHEMA kb_demo FROM trust_user")
         _ = try await admin.records("REVOKE SELECT (dt, hour) ON kb_demo.report_adx_hour FROM trust_user")
         _ = try await admin.records("REVOKE ALL ON SCHEMA kb_demo FROM trust_user")

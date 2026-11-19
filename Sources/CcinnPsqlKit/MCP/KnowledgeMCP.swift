@@ -4,8 +4,8 @@ import PostgresKit
 
 /// What the knowledge tools of the MCP server need besides a connection.
 public struct KnowledgeToolSettings: Sendable {
-    /// (client, PostgreSQL database or nil for the connection's, schema) → relations the role can read.
-    public typealias VisibilityCheck = @Sendable (PostgresClient, String?, String) async throws -> Set<String>?
+    /// (client, PostgreSQL database or nil for the connection's, schema) → relations and columns the role can read.
+    public typealias VisibilityCheck = @Sendable (PostgresClient, String?, String) async throws -> KnowledgeVisibility?
     public typealias Inference = @Sendable (KnowledgeInferenceInput) -> [Relationship]
 
     public var store: KnowledgeStore
@@ -14,7 +14,8 @@ public struct KnowledgeToolSettings: Sendable {
     /// `--no-knowledge-writes`: no knowledge write tools for any connection.
     public var writesDisabled: Bool
     public var home: URL
-    /// The relations of a schema the connection's role can read; `nil` when it cannot use the schema.
+    /// The relations of a schema the connection's role can read, with their readable columns; `nil` when it cannot use the
+    /// schema.
     public var visibleTables: VisibilityCheck
     public var confidence: @Sendable (Relationship) -> Int
     /// Relationships from machine sources (declared, definition, history, naming) for a fresh extraction.
@@ -33,6 +34,33 @@ public struct KnowledgeToolSettings: Sendable {
         self.confidence = confidence
         self.infer = infer
         self.now = now
+    }
+}
+
+/// What one role may read in one schema: each readable relation with the columns it may read (names exactly as stored:
+/// PostgreSQL names are case-sensitive), or `nil` for every column (SELECT on the relation).
+public struct KnowledgeVisibility: Sendable, Equatable {
+    public var columns: [String: Set<String>?]
+
+    public init(columns: [String: Set<String>?]) {
+        self.columns = columns
+    }
+
+    /// Every column of these relations is readable.
+    public init(tables: Set<String>) {
+        var columns: [String: Set<String>?] = [:]
+        for table in tables { columns[table] = .some(nil) }
+        self.columns = columns
+    }
+
+    public var tables: Set<String> { Set(columns.keys) }
+
+    public func contains(_ table: String) -> Bool { columns[table] != nil }
+
+    public func contains(_ table: String, column: String) -> Bool {
+        guard let entry = columns[table] else { return false }
+        guard let readable = entry else { return true }
+        return readable.contains(column)
     }
 }
 
@@ -72,12 +100,16 @@ public enum KnowledgeMCP {
         return scores.max() ?? 0
     }
 
-    /// The role may use the schema, and read (any column of) these relations in it.
-    public static let liveVisibility: KnowledgeToolSettings.VisibilityCheck = { (client: PostgresClient, database: String?, schema: String) async throws -> Set<String>? in
+    /// The role may use the schema, and read these relations in it: whole, or (column grants) only some columns. The
+    /// catalog lists every column whatever the grants, so the columns come from the privileges.
+    public static let liveVisibility: KnowledgeToolSettings.VisibilityCheck = { (client: PostgresClient, database: String?, schema: String) async throws -> KnowledgeVisibility? in
         guard !KnowledgeSQL.systemSchemas.contains(schema) else { return nil }
         let schemas = try await client.knowledgeVisibleSchemas(database: database)
         guard schemas.contains(schema) else { return nil }
-        return try await client.knowledgeVisibleRelations(schema, database: database)
+        let readable = try await client.knowledgeReadableColumns(schema, database: database)
+        var columns: [String: Set<String>?] = readable.columns.mapValues { (names: Set<String>) -> Set<String>? in names }
+        for table in readable.wholeRelations { columns[table] = .some(nil) }
+        return KnowledgeVisibility(columns: columns)
     }
 
     // MARK: Definitions
@@ -168,27 +200,63 @@ public enum KnowledgeMCP {
 
     // MARK: Visibility
 
-    /// Only what the account can see: tables outside `visible` disappear, with everything that mentions them.
-    /// Relationships to other databases stay only when `visibleOther` lists their table.
+    /// Only what the role can see: tables outside `visible` disappear, with everything that mentions them.
+    /// Relationships to other schemas stay only when `visibleOther` lists their table.
     public static func filter(_ knowledge: DatabaseKnowledge, visible: Set<String>, visibleOther: [String: Set<String>] = [:]) -> DatabaseKnowledge {
+        filter(knowledge, visibility: KnowledgeVisibility(tables: visible), visibilityOther: visibleOther.mapValues { KnowledgeVisibility(tables: $0) })
+    }
+
+    /// Only what the role can read: relations it cannot read and columns it cannot read (column grants) disappear, with
+    /// every comment, key, note, term mapping and relationship that mentions them. Relationships to other schemas stay
+    /// only when `visibilityOther` shows their table and columns.
+    public static func filter(_ knowledge: DatabaseKnowledge, visibility: KnowledgeVisibility,
+                              visibilityOther: [String: KnowledgeVisibility] = [:]) -> DatabaseKnowledge {
         var filtered = knowledge
-        filtered.tables = knowledge.tables.filter { visible.contains($0.name) }
+        filtered.tables = knowledge.tables.compactMap { (table: TableFacts) -> TableFacts? in
+            guard visibility.contains(table.name) else { return nil }
+            var table = table
+            let readable = { (column: String) -> Bool in visibility.contains(table.name, column: column) }
+            table.columns = table.columns.filter { readable($0.name) }
+            table.keys.primary = table.keys.primary.allSatisfy(readable) ? table.keys.primary : []
+            table.keys.unique = table.keys.unique.filter { $0.allSatisfy(readable) }
+            table.keys.partition = table.keys.partition.allSatisfy(readable) ? table.keys.partition : []
+            table.keys.sort = table.keys.sort.allSatisfy(readable) ? table.keys.sort : []
+            table.keys.distribution = table.keys.distribution.allSatisfy(readable) ? table.keys.distribution : []
+            return table
+        }
         func isVisible(_ end: Relationship.End) -> Bool {
-            if let database = end.database { return visibleOther[database]?.contains(end.table) ?? false }
-            return visible.contains(end.table)
+            let scope: KnowledgeVisibility?
+            if let schema = end.database {
+                scope = visibilityOther[schema]
+            } else {
+                scope = visibility
+            }
+            guard let scope, scope.contains(end.table) else { return false }
+            return end.columns.allSatisfy { scope.contains(end.table, column: $0) }
         }
         filtered.relationships = knowledge.relationships.filter { isVisible($0.from) && isVisible($0.to) }
-        filtered.notes = knowledge.notes.filter { visible.contains($0.table) }
+        filtered.notes = knowledge.notes.filter { (note: Note) -> Bool in
+            guard visibility.contains(note.table) else { return false }
+            guard let column = note.column else { return true }
+            return visibility.contains(note.table, column: column)
+        }
         filtered.terms = knowledge.terms.compactMap { (term: Term) -> Term? in
             var term = term
             let original = term.mapsTo
-            term.mapsTo = original.filter { visible.contains($0.table) }
-            // A term about hidden tables only would reveal them; one mapped to no table is plain glossary.
+            term.mapsTo = original.filter { (mapping: Term.Mapping) -> Bool in
+                guard visibility.contains(mapping.table) else { return false }
+                if let column = mapping.column, !visibility.contains(mapping.table, column: column) { return false }
+                // An expression could name a column the role cannot read.
+                guard mapping.expression != nil else { return true }
+                let stored = knowledge.table(named: mapping.table)?.columns ?? []
+                return stored.allSatisfy { visibility.contains(mapping.table, column: $0.name) }
+            }
+            // A term about hidden tables or columns only would reveal them; one mapped to no table is plain glossary.
             return !original.isEmpty && term.mapsTo.isEmpty ? nil : term
         }
         filtered.areas = knowledge.areas.map { (area: SubjectArea) -> SubjectArea in
             var area = area
-            area.tables = area.tables.filter { visible.contains($0) }
+            area.tables = area.tables.filter { visibility.contains($0) }
             return area
         }.filter { !$0.tables.isEmpty }
         return filtered
@@ -246,9 +314,11 @@ public enum KnowledgeMCP {
         path.hasPrefix("~") ? home.standardizedFileURL.path + path.dropFirst() : path
     }
 
-    /// The `origin` remote of a git checkout without credentials (`https://user:token@host/…` → `https://host/…`).
+    /// The `origin` remote of a git checkout without credentials (`https://user:token@host/…` → `https://host/…`). The
+    /// file is read only when it is a regular file (not a FIFO, device or symbolic link) of at most 64 KB, without
+    /// blocking: a hostile checkout cannot stall a link.
     public static func gitRemote(of directory: String) -> String? {
-        guard let config = try? String(contentsOfFile: directory + "/.git/config", encoding: .utf8) else { return nil }
+        guard let config = readSmallRegularFile(directory + "/.git/config", limit: 65_536) else { return nil }
         var inOrigin = false
         for line in config.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -261,6 +331,21 @@ public enum KnowledgeMCP {
             return url.isEmpty ? nil : String(url.prefix(300))
         }
         return nil
+    }
+
+    static func readSmallRegularFile(_ path: String, limit: Int) -> String? {
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size >= 0, info.st_size <= off_t(limit) else { return nil }
+        var data = Data(count: Int(info.st_size))
+        let count = data.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return read(descriptor, base, buffer.count)
+        }
+        guard count >= 0 else { return nil }
+        return String(decoding: data.prefix(count), as: UTF8.self)
     }
 
     public static func projectID(path: String) -> String {

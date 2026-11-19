@@ -4,19 +4,19 @@ import PostgresKit
 /// What a role can read, per profile, database and schema, for five minutes: knowledge built through one role never
 /// shows another role tables it cannot read.
 public actor KnowledgeVisibilityCache {
-    private var entries: [String: (at: ContinuousClock.Instant, tables: Set<String>?)] = [:]
+    private var entries: [String: (at: ContinuousClock.Instant, visibility: KnowledgeVisibility?)] = [:]
     private let lifetime: Duration
 
     public init(lifetime: Duration = .seconds(300)) {
         self.lifetime = lifetime
     }
 
-    func tables(profile: UUID, database: String, schema: String, load: () async throws -> Set<String>?) async throws -> Set<String>? {
+    func visibility(profile: UUID, database: String, schema: String, load: () async throws -> KnowledgeVisibility?) async throws -> KnowledgeVisibility? {
         let key = profile.uuidString + "\u{1F}" + database + "\u{1F}" + schema
-        if let entry = entries[key], ContinuousClock.now - entry.at < lifetime { return entry.tables }
-        let tables = try await load()
-        entries[key] = (ContinuousClock.now, tables)
-        return tables
+        if let entry = entries[key], ContinuousClock.now - entry.at < lifetime { return entry.visibility }
+        let visibility = try await load()
+        entries[key] = (ContinuousClock.now, visibility)
+        return visibility
     }
 }
 
@@ -148,31 +148,31 @@ extension PostgresMCPTools {
         return index.clusters.first { $0.key == derived || $0.aliases.contains(derived) }?.key ?? derived
     }
 
-    func visible(_ key: DatabaseKey, _ client: PostgresClient, _ profile: ConnectionProfile, _ settings: KnowledgeToolSettings) async throws -> Set<String> {
-        let tables = try await visibilityCache.tables(profile: profile.id, database: key.catalog, schema: key.database) {
+    func visible(_ key: DatabaseKey, _ client: PostgresClient, _ profile: ConnectionProfile, _ settings: KnowledgeToolSettings) async throws -> KnowledgeVisibility {
+        let visibility = try await visibilityCache.visibility(profile: profile.id, database: key.catalog, schema: key.database) {
             try await settings.visibleTables(client, key.catalog, key.database)
         }
-        guard let tables else {
+        guard let visibility else {
             throw MCPToolError("Schema “\(key.database)” does not exist in database “\(key.catalog)”, or this connection's role cannot use it.")
         }
-        return tables
+        return visibility
     }
 
     /// The stored knowledge (built on first use), limited to what this connection's role can read.
     func visibleKnowledge(_ key: DatabaseKey, _ client: PostgresClient, _ profile: ConnectionProfile,
                           _ settings: KnowledgeToolSettings) async throws -> DatabaseKnowledge {
-        let tables = try await visible(key, client, profile, settings)
+        let visibility = try await visible(key, client, profile, settings)
         if try settings.store.database(key) == nil {
             _ = try await refreshKnowledge(key, client, settings, mineHistory: true)
         }
         guard let stored = try settings.store.database(key) else { throw MCPToolError("No knowledge could be built for schema \(key.database).") }
-        var visibleOther: [String: Set<String>] = [:]
+        var visibilityOther: [String: KnowledgeVisibility] = [:]
         let others = Set(stored.relationships.flatMap { [$0.from.database, $0.to.database].compactMap { $0 } })
         for schema in others.sorted() {
             let other = DatabaseKey(cluster: key.cluster, catalog: key.catalog, database: schema)
-            visibleOther[schema] = (try? await visible(other, client, profile, settings)) ?? []
+            visibilityOther[schema] = (try? await visible(other, client, profile, settings)) ?? KnowledgeVisibility(columns: [:])
         }
-        return KnowledgeMCP.filter(stored, visible: tables, visibleOther: visibleOther)
+        return KnowledgeMCP.filter(stored, visibility: visibility, visibilityOther: visibilityOther)
     }
 
     func otherDatabaseTables(_ items: [JSONValue], key: DatabaseKey, client: PostgresClient, profile: ConnectionProfile,
@@ -181,9 +181,10 @@ extension PostgresMCPTools {
         let schemas = Set(items.compactMap { $0.objectValue?["to_schema"]?.stringValue }.filter { $0 != key.database })
         for schema in schemas.sorted() {
             let otherKey = DatabaseKey(cluster: key.cluster, catalog: key.catalog, database: schema)
-            let tables = try await visible(otherKey, client, profile, settings)
+            let visibility = try await visible(otherKey, client, profile, settings)
             if try settings.store.database(otherKey) == nil { _ = try await refreshKnowledge(otherKey, client, settings, mineHistory: false) }
-            result[schema] = (try settings.store.database(otherKey)?.tables ?? []).filter { tables.contains($0.name) }
+            let stored = try settings.store.database(otherKey) ?? DatabaseKnowledge(key: otherKey)
+            result[schema] = KnowledgeMCP.filter(stored, visibility: visibility).tables
         }
         return result
     }
@@ -219,12 +220,12 @@ extension PostgresMCPTools {
         var rows: [JSONValue] = []
         var hidden = 0
         for entry in entries.sorted(by: { $0.key.database < $1.key.database }) {
-            guard let tables = try? await visible(entry.key, client, profile, settings),
+            guard let visibility = try? await visible(entry.key, client, profile, settings),
                   let stored = try settings.store.database(entry.key) else {
                 hidden += 1
                 continue
             }
-            let knowledge = KnowledgeMCP.filter(stored, visible: tables)
+            let knowledge = KnowledgeMCP.filter(stored, visibility: visibility)
             let live = knowledge.tables.filter { $0.state != .dropped }
             rows.append(["schema": .string(entry.key.database), "database": .string(entry.key.catalog), "tables": .int(Int64(live.count)),
                          "changed": .int(Int64(live.filter { $0.state == .changed }.count)),
@@ -335,6 +336,8 @@ extension PostgresMCPTools {
         let databaseID = key.fileID
         let projectID = KnowledgeMCP.projectID(path: path)
         let now = settings.now()
+        let expanded = KnowledgeMCP.expand(path, home: settings.home)
+        let remote = unlink ? nil : KnowledgeMCP.gitRemote(of: expanded) // outside the lock: other writers never wait on a checkout
         try settings.store.updateIndex { index in
             if !index.databases.contains(where: { $0.key == key }) { index.databases.append(KnowledgeIndex.DatabaseEntry(key: key)) }
             if !index.clusters.contains(where: { $0.key == key.cluster || $0.aliases.contains(key.cluster) }) {
@@ -345,10 +348,8 @@ extension PostgresMCPTools {
                 return
             }
             if !index.projects.contains(where: { $0.id == projectID }) {
-                let expanded = KnowledgeMCP.expand(path, home: settings.home)
                 let name = args.string("name").map { KnowledgeMCP.clean($0, limit: 120) } ?? URL(fileURLWithPath: expanded).lastPathComponent
-                index.projects.append(KnowledgeIndex.Project(id: projectID, path: path, name: name, gitRemote: KnowledgeMCP.gitRemote(of: expanded),
-                                                             addedAt: now, addedBy: by))
+                index.projects.append(KnowledgeIndex.Project(id: projectID, path: path, name: name, gitRemote: remote, addedAt: now, addedBy: by))
             }
             if !index.links.contains(where: { $0.project == projectID && $0.database == databaseID }) {
                 index.links.append(KnowledgeIndex.Link(project: projectID, database: databaseID, addedAt: now, addedBy: by))
