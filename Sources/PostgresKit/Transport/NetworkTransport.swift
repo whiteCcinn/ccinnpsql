@@ -260,10 +260,13 @@ enum TLSSetup {
         return options
     }
 
+    /// Larger files are no CA bundle (the whole Mozilla trust store is about 300 KB).
+    static let maximumCertificateFileBytes = 4 << 20
+
     /// Certificates from a PEM bundle (or a single DER file).
     static func loadCertificates(path: String) throws -> [SecCertificate] {
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        guard let data = try? Data(contentsOf: url) else {
+        guard let data = readCertificateFile(atPath: url.path) else {
             throw PostgresError(.tls, "Could not read the CA certificate file \(url.path)")
         }
         var certificates: [SecCertificate] = []
@@ -284,6 +287,25 @@ enum TLSSetup {
         }
         guard !certificates.isEmpty else { throw PostgresError(.tls, "\(url.lastPathComponent) contains no certificates") }
         return certificates
+    }
+
+    /// The bytes of a regular file of at most `maximumCertificateFileBytes`, or `nil`. A path naming a device or a pipe
+    /// (`/dev/zero`, a FIFO), for example in an imported profile, must neither block the connection nor exhaust memory:
+    /// the file is opened without blocking and checked through its descriptor, so it cannot be swapped in between.
+    static func readCertificateFile(atPath path: String) -> Data? {
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG else { return nil }
+        guard status.st_size <= off_t(maximumCertificateFileBytes) else { return nil }
+        let data: Data
+        do {
+            data = try handle.read(upToCount: maximumCertificateFileBytes + 1) ?? Data()
+        } catch {
+            return nil
+        }
+        return data.count <= maximumCertificateFileBytes ? data : nil
     }
 
     static func isIPAddress(_ host: String) -> Bool {

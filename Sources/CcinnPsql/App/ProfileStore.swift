@@ -97,6 +97,32 @@ final class ProfileStore {
         try? persist()
     }
 
+    /// Adds or replaces the profiles of an import (already stamped by the import) in one save. Their secrets are
+    /// already in the Keychain. When saving fails the list stays as it was.
+    func apply(_ upserts: [ConnectionProfile]) throws {
+        try replace(with: BackupImportApplier.upserting(upserts, into: profiles))
+    }
+
+    /// Undoes an import's profile changes (see `BackupProfileRestore`) and removes the Keychain items of the profiles it
+    /// takes out, also ones the import recorded but never saved.
+    func restore(_ restore: BackupProfileRestore) throws -> BackupProfileRestore.Outcome {
+        let outcome = restore.apply(to: profiles)
+        try replace(with: outcome.profiles)
+        for id in outcome.removed { try? repository.deleteSecrets(of: id) }
+        return outcome
+    }
+
+    private func replace(with updated: [ConnectionProfile]) throws {
+        let previous = profiles
+        profiles = updated
+        do {
+            try persist()
+        } catch {
+            profiles = previous
+            throw error
+        }
+    }
+
     func password(for profile: ConnectionProfile) -> String? { repository.password(for: profile) }
     func sshSecret(for profile: ConnectionProfile) -> String? { repository.sshSecret(for: profile) }
 
@@ -118,4 +144,5 @@ final class AppServices {
 
     let profiles = ProfileStore()
     let historyDirectory = QueryHistoryStore.defaultDirectory
+    private(set) lazy var backup = BackupCenter(stores: .live(profiles: profiles, historyDirectory: historyDirectory))
 }
