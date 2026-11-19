@@ -299,6 +299,8 @@ struct BackupFormatTests {
         #expect(throws: BackupError.self) { try BackupFormat.decode(relativeCA) }
         let traversingCA = try F.replacingPayload(of: data) { $0.replacingOccurrences(of: "~/certs/ca.pem", with: "~/../../etc/ca.pem") }
         #expect(throws: BackupError.self) { try BackupFormat.decode(traversingCA) }
+        let blankCA = try F.replacingPayload(of: data) { $0.replacingOccurrences(of: "\"~/certs/ca.pem\"", with: "\"  \"") }
+        #expect(try BackupFormat.decode(blankCA).payload.profiles.first?.rootCertificatePath == "  ", "blank is the system trust store")
         let longDatabase = try F.replacingPayload(of: data) { text in
             text.replacingOccurrences(of: "\"database\":\"adx\",\"host\"", with: "\"database\":\"\(String(repeating: "d", count: 2_000))\",\"host\"")
         }

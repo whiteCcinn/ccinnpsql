@@ -59,7 +59,8 @@ enum BackupValidation {
         try requireIdentifier(profile.database, "database name")
         let timeoutIsSane = profile.connectTimeout > 0 && profile.connectTimeout <= 3_600
         try require(timeoutIsSane, "a connect timeout outside 0–3600 seconds")
-        if let path = profile.rootCertificatePath, !path.isEmpty {
+        // Blank is the system trust store; surrounding spaces are trimmed when connecting (and by `withPortablePaths`).
+        if let path = profile.rootCertificatePath?.nilIfBlank {
             try require(BackupPaths.isAcceptable(path), "a CA certificate path that is not absolute or ~-relative")
         }
         guard let ssh = profile.ssh else { return }
