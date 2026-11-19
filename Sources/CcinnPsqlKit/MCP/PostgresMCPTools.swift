@@ -43,16 +43,35 @@ public struct PostgresMCPTools: MCPToolProvider {
     public let resolver: MCPProfileResolver
     public let registry: MCPClientRegistry
     public let audit: MCPAuditLog?
+    /// Knowledge tools are offered when set.
+    public let knowledge: KnowledgeToolSettings?
+    let visibilityCache = KnowledgeVisibilityCache()
 
     public static let defaultRowLimit = 200
     public static let maxRowLimit = 1_000
     public static let defaultTimeout = 30.0
     public static let maxTimeout = 120.0
 
-    public init(resolver: MCPProfileResolver, registry: MCPClientRegistry, audit: MCPAuditLog?) {
+    public init(resolver: MCPProfileResolver, registry: MCPClientRegistry, audit: MCPAuditLog?, knowledge: KnowledgeToolSettings? = nil) {
         self.resolver = resolver
         self.registry = registry
         self.audit = audit
+        self.knowledge = knowledge
+    }
+
+    /// Knowledge write tools exist when some enabled connection lets AI write knowledge.
+    var knowledgeWritesAvailable: Bool {
+        guard let knowledge, !knowledge.writesDisabled else { return false }
+        return resolver.enabledProfiles.contains { $0.mcpKnowledgeWrites }
+    }
+
+    public func prompts() async -> [MCPPrompt] {
+        knowledge == nil ? [] : KnowledgeMCP.prompts
+    }
+
+    public func prompt(name: String, arguments: [String: String]) async throws -> MCPPromptText {
+        guard knowledge != nil else { throw MCPToolError("Unknown prompt “\(name)”.") }
+        return try KnowledgeMCP.prompt(name: name, arguments: arguments)
     }
 
     // MARK: Definitions
@@ -131,6 +150,11 @@ public struct PostgresMCPTools: MCPToolProvider {
                                                            "timeout_seconds": ["type": "number", "minimum": 1, "maximum": .int(Int64(Self.maxTimeout))]],
                                                           required: ["sql"]), readOnly: false, destructive: true, idempotent: false))
         }
+        if knowledge != nil {
+            tools += KnowledgeMCP.tools(writes: knowledgeWritesAvailable) { (properties: [String: JSONValue], required: [String]) -> JSONValue in
+                Self.schema(properties, required: required)
+            }
+        }
         return tools
     }
 
@@ -152,6 +176,10 @@ public struct PostgresMCPTools: MCPToolProvider {
         var connection: String?
         var statement: String?
         var rows: Int?
+        /// The MCP client's name (`clientInfo.name`).
+        var client: String?
+        /// What a knowledge write changed, for the audit log.
+        var detail: String?
         private let lock = NSLock()
         private var notices: [String] = []
 
@@ -164,9 +192,14 @@ public struct PostgresMCPTools: MCPToolProvider {
     }
 
     public func call(name: String, arguments: [String: JSONValue]) async -> MCPToolResult {
+        await call(name: name, arguments: arguments, context: MCPCallContext())
+    }
+
+    public func call(name: String, arguments: [String: JSONValue], context client: MCPCallContext) async -> MCPToolResult {
         let clock = ContinuousClock()
         let started = clock.now
         let context = CallContext()
+        context.client = client.clientName
         let result: MCPToolResult
         var failure: String?
         do {
@@ -180,7 +213,7 @@ public struct PostgresMCPTools: MCPToolProvider {
         let elapsed = clock.now - started
         let milliseconds = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
         await audit?.record(tool: name, connection: context.connection, statement: context.statement, durationMilliseconds: milliseconds,
-                            rows: context.rows, error: failure)
+                            rows: context.rows, error: failure, client: context.client, detail: context.detail)
         return result
     }
 
@@ -215,7 +248,8 @@ public struct PostgresMCPTools: MCPToolProvider {
         if name == "list_connections" { return listConnections() }
         let known = ["server_info", "list_databases", "get_settings", "list_roles", "list_schemas", "list_tables", "describe_table", "get_table_stats", "get_activity",
                      "get_replication", "get_top_statements", "run_query", "explain_query", "execute_statement"]
-        guard known.contains(name) else { throw MCPToolError("Unknown tool “\(name)”.") }
+        let isKnowledgeTool = knowledge != nil && (KnowledgeMCP.readTools.contains(name) || KnowledgeMCP.writeTools.contains(name))
+        guard known.contains(name) || isKnowledgeTool else { throw MCPToolError("Unknown tool “\(name)”.") }
         let resolved = try resolver.resolve(args.string("connection"))
         context.connection = resolved.profile.displayName
         if name == "execute_statement", resolved.access != .readWrite {
@@ -237,6 +271,9 @@ public struct PostgresMCPTools: MCPToolProvider {
         let policy = Self.rolePolicy(for: resolved)
         if let policy, !Self.statementTools.contains(name), !client.serverInfo.isPgBouncerConsole {
             try await Self.checkRole(client, database: args.string("database"), policy: policy, context: context)
+        }
+        if isKnowledgeTool, let knowledge {
+            return try await knowledgeCall(name, args, client, resolved.profile, context, knowledge)
         }
         return switch name {
         case "server_info": serverInfo(client)
