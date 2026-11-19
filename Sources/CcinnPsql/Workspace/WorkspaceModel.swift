@@ -67,6 +67,7 @@ struct WorkspaceTab: Identifiable, Equatable {
         case sql(SQLTabModel)
         case operations(OperationsModel)
         case notifications(NotificationsModel)
+        case knowledge(KnowledgeTabModel)
     }
 
     let id = UUID()
@@ -80,6 +81,7 @@ struct WorkspaceTab: Identifiable, Equatable {
         case let .sql(model): model.title
         case .operations: "Server"
         case .notifications: "LISTEN / NOTIFY"
+        case let .knowledge(model): model.title
         }
     }
 
@@ -89,6 +91,7 @@ struct WorkspaceTab: Identifiable, Equatable {
         case let .sql(model): model.database
         case .operations: nil
         case let .notifications(model): model.database
+        case let .knowledge(model): model.key.catalog + " · " + model.key.database
         }
     }
 
@@ -98,6 +101,7 @@ struct WorkspaceTab: Identifiable, Equatable {
         case .sql: "chevron.left.forwardslash.chevron.right"
         case .operations: "waveform.path.ecg"
         case .notifications: "bell.badge"
+        case .knowledge: "books.vertical"
         }
     }
 }
@@ -370,6 +374,21 @@ final class WorkspaceModel {
         selectedTabID = tab.id
     }
 
+    /// The knowledge tab of a schema in the current database (one per schema).
+    func openKnowledge(schema: String) {
+        let database = currentDatabase
+        if let existing = tabs.first(where: { (tab: WorkspaceTab) -> Bool in
+            if case let .knowledge(model) = tab.kind { return model.key.catalog == database && model.key.database == schema }
+            return false
+        }) {
+            selectedTabID = existing.id
+            return
+        }
+        let tab = WorkspaceTab(kind: .knowledge(KnowledgeTabModel(workspace: self, schema: schema)))
+        tabs.append(tab)
+        selectedTabID = tab.id
+    }
+
     func openNotifications() {
         if let existing = tabs.first(where: { if case .notifications = $0.kind { true } else { false } }) {
             selectedTabID = existing.id
@@ -410,6 +429,7 @@ final class WorkspaceModel {
         case let .sql(model): model.close()
         case let .operations(model): model.close()
         case let .notifications(model): model.close()
+        case let .knowledge(model): model.stopWatching()
         case .object: break
         }
     }

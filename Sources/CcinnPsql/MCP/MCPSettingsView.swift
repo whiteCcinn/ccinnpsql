@@ -77,6 +77,13 @@ struct MCPSettingsView: View {
                     if profile.mcpAccess == .readOnly {
                         privilegedRoleControls(for: profile)
                     }
+                    if profile.mcpAccess != .disabled {
+                        Toggle(isOn: Binding(get: { profile.mcpKnowledgeWrites }, set: { store.setMCPKnowledgeWrites($0, for: profile) })) {
+                            Text("AI may write knowledge")
+                            Text("Lets AI sessions add notes, relationships, glossary terms and project links to this Mac's knowledge base. It never changes the server, so it works with read-only access too.")
+                        }
+                        .toggleStyle(.checkbox)
+                    }
                 }
                 Text("Read-only allows metadata tools and SELECT / WITH / SHOW / EXPLAIN, checked by the app and run inside READ ONLY transactions with a statement timeout, at most 1,000 rows per call. Read & write adds a tool that runs any statement. Every call is logged (passwords redacted) to mcp-audit.jsonl in the app's data folder.")
                     .font(.caption)

@@ -166,7 +166,7 @@ struct ConnectingView: View {
 ///     CcinnPsql --profile <saved name>
 ///     CcinnPsql --connect host:port [--user u] [--database db] [--sslmode prefer] [--object schema.name]
 ///               [--section overview|structure|partitions|statistics|ddl|data|grants] [--sql "…"] [--auto-run]
-///               [--view grid|chart|plan] [--explain] [--operations activity|locks|replication|…] [--notifications]
+///               [--view grid|chart|plan] [--explain] [--operations activity|locks|replication|…] [--notifications] [--knowledge <schema>]
 ///               [--duplicate-window] [--format]
 ///     … [--appearance light|dark] [--settings mcp] [--snapshot out.png --snapshot-delay 6 --quit-after-snapshot]
 ///
@@ -225,6 +225,7 @@ enum LaunchArguments {
                         workspace.open(.relation(relation, database: workspace.currentDatabase), section: section)
                     }
                 }
+                if let schema = value("--knowledge") { workspace.openKnowledge(schema: schema) }
                 if let sql = value("--sql") {
                     let model = workspace.openSQL(text: sql.replacingOccurrences(of: "\\n", with: "\n"), database: value("--database"))
                     if has("--format") {

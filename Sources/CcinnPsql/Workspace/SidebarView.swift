@@ -167,6 +167,9 @@ private struct SchemaRow: View {
                     workspace.openSQL(text: "SET search_path TO \(SQLText.identifier(schema)), public;\n\n", database: workspace.currentDatabase)
                 }
                 Button("Refresh") { workspace.loadSchema(schema, force: true) }
+                if !KnowledgeSQL.systemSchemas.contains(schema) {
+                    Button("Knowledge") { workspace.openKnowledge(schema: schema) }
+                }
                 Divider()
                 Button("Copy Name") { Pasteboard.copy(schema) }
             }
