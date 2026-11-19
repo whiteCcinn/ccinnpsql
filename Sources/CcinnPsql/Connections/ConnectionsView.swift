@@ -476,9 +476,10 @@ struct ConnectionEditorView: View {
 
 /// The equivalent `psql` command line (no password: psql prompts or uses ~/.pgpass).
 enum PsqlCommand {
-    static func make(for profile: ConnectionProfile) -> String {
+    /// A CA path written `~/…` (as backups store it) is expanded: neither the shell (inside quotes) nor libpq would.
+    static func make(for profile: ConnectionProfile, home: String = NSHomeDirectory()) -> String {
         var parts = ["psql", "\"host=\(profile.host) port=\(profile.port) dbname=\(profile.effectiveDatabase) user=\(profile.username) sslmode=\(profile.sslMode.rawValue)"]
-        if let ca = profile.rootCertificatePath, !ca.isEmpty { parts[1] += " sslrootcert=\(ca)" }
+        if let ca = profile.rootCertificatePath, !ca.isEmpty { parts[1] += " sslrootcert=\(BackupPaths.expandingHome(ca, home: home))" }
         parts[1] += "\""
         return parts.joined(separator: " ")
     }
