@@ -1,0 +1,91 @@
+import CcinnPsqlKit
+import Foundation
+import PostgresKit
+import Testing
+
+/// The knowledge base against real servers, on the `kb_demo` schema of `scripts/seed-knowledge.sql`.
+@Suite("Knowledge integration", .enabled(if: IT.enabled), .serialized)
+struct KnowledgeIntegrationTests {
+    private func temporaryStore() -> KnowledgeStore {
+        KnowledgeStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("ccinnpsql-kb-\(UUID().uuidString)", isDirectory: true))
+    }
+
+    @Test(arguments: IT.versions)
+    func extractionReadsKeysPartitionsViewsAndForeignKeys(version: String) async throws {
+        let client = try await IT.client(version)
+        defer { Task { await client.close() } }
+        let schema = try await KnowledgeExtractor.extract(schema: "kb_demo", database: nil, from: client)
+        let names = schema.tables.map(\.name)
+        #expect(Set(names) == ["publisher", "app", "dsp", "dsp_budget", "report_adx_hour", "v_dsp_report", "mv_app_day"], "partitions fold into their parent")
+        let report = try #require(schema.tables.first { $0.name == "report_adx_hour" })
+        #expect(report.kind == .table && report.keys.primary == ["dt", "hour", "dsp_id", "app_id"] && report.keys.partition == ["dt"])
+        #expect(report.comment == "ADX hourly report" && report.columns.first { $0.name == "dsp_id" }?.comment == "DSP")
+        #expect(report.columns.first { $0.name == "revenue" }?.type == "numeric(18,6)")
+        #expect(schema.tables.first { $0.name == "dsp" }?.keys.unique == [["tenant", "code"]])
+        #expect(schema.tables.first { $0.name == "v_dsp_report" }?.kind == .view)
+        #expect(schema.tables.first { $0.name == "mv_app_day" }?.kind == .materializedView)
+        #expect(schema.tables.first { $0.name == "v_dsp_report" }?.definition?.contains("JOIN") == true)
+
+        let keys = Dictionary(schema.foreignKeys.map { ($0.table + "." + $0.columns.joined(separator: ","), $0) }, uniquingKeysWith: { first, _ in first })
+        #expect(keys["publisher.country_code"]?.referencedSchema == "kb_ref" && keys["publisher.country_code"]?.isGuaranteed == true)
+        #expect(keys["app.publisher_id"]?.isGuaranteed == false, "NOT VALID")
+        #expect(keys["report_adx_hour.app_id"]?.referencedTable == "app" && keys["report_adx_hour.app_id"]?.isGuaranteed == true)
+        if client.serverInfo.version.atLeast(18) {
+            #expect(keys["dsp_budget.dsp_id"]?.isGuaranteed == false, "NOT ENFORCED")
+        } else {
+            #expect(keys["dsp_budget.dsp_id"] == nil)
+        }
+        #expect(schema.serverVersion?.contains(version) == true)
+    }
+
+    @Test(arguments: IT.versions)
+    func refreshInfersEverySourceAndScoresByGuarantee(version: String) async throws {
+        let client = try await IT.client(version)
+        defer { Task { await client.close() } }
+        let store = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: store.directory) }
+        let key = DatabaseKey(cluster: ClusterKey(rawValue: "pg://127.0.0.1:\(IT.port(version))"), catalog: "ccinn", database: "kb_demo")
+        let history = [QueryHistoryEntry(sql: "SELECT * FROM report_adx_hour r JOIN dsp d ON r.dsp_id = d.id WHERE r.dt = '2026-11-19'", database: "ccinn",
+                                         durationMilliseconds: 3)]
+        let report = try await KnowledgeService.refresh(key, source: client, store: store, history: history, infer: KnowledgeInference.machineRelationships,
+                                                        now: Date())
+        #expect(report.tables.total == 7)
+        let knowledge = try #require(try store.database(key))
+        func relationship(_ from: String, _ to: String) -> Relationship? {
+            knowledge.relationships.first { "\($0.from.table).\($0.from.columns.joined(separator: ","))" == from
+                && "\($0.to.database.map { $0 + "." } ?? "")\($0.to.table).\($0.to.columns.joined(separator: ","))" == to }
+        }
+        let toCountry = try #require(relationship("publisher.country_code", "kb_ref.country.code"))
+        #expect(RelationshipConfidence.score(toCountry) == 100)
+        let toPublisher = try #require(relationship("app.publisher_id", "publisher.id"))
+        #expect(RelationshipConfidence.score(toPublisher) < 100 && toPublisher.evidence.contains { $0.source == .declared }, "NOT VALID scores below a fact")
+        let toDSP = try #require(relationship("report_adx_hour.dsp_id", "dsp.id"))
+        let sources = Set(toDSP.evidence.map(\.source))
+        #expect(sources.isSuperset(of: [.definition, .history, .naming]), "\(sources)")
+        #expect(toDSP.kind == .manyToOne)
+        let lineage = knowledge.relationships.filter { $0.kind == .lineage && $0.from.table == "mv_app_day" }
+        #expect(Set(lineage.map(\.to.table)) == ["report_adx_hour", "app"])
+        #expect(try store.index().clusters.first { $0.key == key.cluster }?.serverIdentifier != nil || !client.serverInfo.isSuperuser,
+                "a superuser can read system_identifier")
+    }
+
+    @Test(arguments: IT.versions)
+    func visibilityFollowsTheRolesPrivileges(version: String) async throws {
+        let admin = try await IT.client(version)
+        defer { Task { await admin.close() } }
+        _ = try await admin.records("REVOKE ALL ON SCHEMA kb_demo FROM trust_user")
+        _ = try await admin.records("REVOKE ALL ON ALL TABLES IN SCHEMA kb_demo FROM trust_user")
+        let restricted = try await PostgresClient.connect(IT.configuration(version, user: "trust_user", password: "", sslMode: .disable), poolSize: 1)
+        defer { Task { await restricted.close() } }
+        #expect(try await KnowledgeMCP.liveVisibility(restricted, nil, "kb_demo") == nil, "no USAGE on the schema")
+        _ = try await admin.records("GRANT USAGE ON SCHEMA kb_demo TO trust_user")
+        _ = try await admin.records("GRANT SELECT ON kb_demo.dsp TO trust_user")
+        _ = try await admin.records("GRANT SELECT (dt, hour) ON kb_demo.report_adx_hour TO trust_user")
+        let visible = try await KnowledgeMCP.liveVisibility(restricted, nil, "kb_demo")
+        #expect(visible == ["dsp", "report_adx_hour"], "a table with one readable column counts")
+        #expect(try await KnowledgeMCP.liveVisibility(restricted, nil, "pg_catalog") == nil)
+        _ = try await admin.records("REVOKE ALL ON ALL TABLES IN SCHEMA kb_demo FROM trust_user")
+        _ = try await admin.records("REVOKE SELECT (dt, hour) ON kb_demo.report_adx_hour FROM trust_user")
+        _ = try await admin.records("REVOKE ALL ON SCHEMA kb_demo FROM trust_user")
+    }
+}
