@@ -55,6 +55,11 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
     public var mcpAllowPrivilegedRole: Bool
     public var createdAt: Date
     public var lastConnectedAt: Date?
+    /// Set on every save; backups use it to tell which side of a conflict is newer.
+    public var updatedAt: Date?
+    /// Whether an AI may write knowledge (notes, relationships, glossary) for this connection's schemas. Knowledge is
+    /// local to this Mac and never changes the server, so it is allowed on read-only AI access too.
+    public var mcpKnowledgeWrites: Bool = true
 
     public init(id: UUID = UUID(), name: String = "", host: String = "127.0.0.1", port: Int = 5432, username: String = "postgres",
                 database: String = "postgres", sslMode: SSLMode = .prefer, sslNegotiation: SSLNegotiation = .postgres,
@@ -107,6 +112,8 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         mcpAllowPrivilegedRole = (try? container.decodeIfPresent(Bool.self, forKey: .mcpAllowPrivilegedRole)) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
+        updatedAt = try? container.decodeIfPresent(Date.self, forKey: .updatedAt)
+        mcpKnowledgeWrites = (try? container.decodeIfPresent(Bool.self, forKey: .mcpKnowledgeWrites)) ?? true
     }
 
     public static func recents(_ profiles: [ConnectionProfile]) -> [ConnectionProfile] {
@@ -308,7 +315,12 @@ public final class ProfileRepository: Sendable {
     }
 
     public func delete(_ profile: ConnectionProfile) throws {
-        try secrets.setSecret(nil, for: SecretKey(profileID: profile.id, kind: .password))
-        try secrets.setSecret(nil, for: SecretKey(profileID: profile.id, kind: .sshSecret))
+        try deleteSecrets(of: profile.id)
+    }
+
+    /// Removes a profile's password and SSH secret from the Keychain.
+    public func deleteSecrets(of profileID: UUID) throws {
+        try secrets.setSecret(nil, for: SecretKey(profileID: profileID, kind: .password))
+        try secrets.setSecret(nil, for: SecretKey(profileID: profileID, kind: .sshSecret))
     }
 }
