@@ -185,3 +185,14 @@ struct KnowledgeDiagramTests {
         }
     }
 }
+
+@Suite("Knowledge search phrases")
+struct KnowledgeSearchPhraseTests {
+    @Test func aPhraseFindsTheTableWhoseCommentHoldsIt() {
+        var knowledge = DatabaseKnowledge(key: DatabaseKey(cluster: ClusterKey(rawValue: "pg://db:5432"), catalog: "ccinn", database: "kb_demo"))
+        knowledge.tables = [TableFacts(name: "report_adx_hour", kind: .table, comment: "ADX hourly report", fingerprint: "f", state: .fresh,
+                                       firstSeen: Date(timeIntervalSince1970: 0))]
+        let hits = KnowledgeSearch.search("hourly report", in: knowledge).hits
+        #expect(hits.map(\.name) == ["report_adx_hour"], "\(hits)")
+    }
+}

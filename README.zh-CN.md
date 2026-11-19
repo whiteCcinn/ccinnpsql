@@ -81,6 +81,8 @@ CcinnPsql 一键回答这些问题。它是原生 SwiftUI/AppKit 应用，自带
   - 通过系统 `ssh` 建立 SSH 隧道，密码保存在钥匙串中。
   - **感知 PgBouncer 与 Pgpool-II**：自动检测事务池模式（也可在连接中指定），会话级功能会说明原因并降级，而不是悄悄失效；PgBouncer 管理控制台可执行 `SHOW POOLS` 等命令。
 - **MCP 服务**：让 AI 助手通过你授权的连接浏览数据库、执行只读查询（见下文）。
+- **AI 构建一次、反复复用的知识库**：按 schema 记录表与表之间的关系（来自声明的外键、视图定义、你的查询历史、命名，以及 AI 读到的代码）、注释说明、任意语言的术语表、主题域与 ER 图，并关联到本地项目。之后的会话直接查知识库，不必重新摸索表结构。详见[知识库](#知识库)。
+- **一步迁移到另一台 Mac**：「文件 ▸ Export Settings and Knowledge…」把连接、知识库及关联的项目、应用设置（可选查询历史）写进一个文件；密码只有在你用口令加密时才会写入。导入前先预览所有改动，导入后可以撤销。详见[迁移到另一台 Mac](#迁移到另一台-mac)。
 
 ## 兼容性
 
@@ -150,6 +152,29 @@ CcinnPsql 每天也会在后台自动检查一次，可以在 **设置 → 通�
 | **⇧⌘R** | 刷新 schema |
 | **⇧⌘D** | 断开连接 |
 
+## 迁移到另一台 Mac
+
+**文件 ▸ Export Settings and Knowledge…**（也可在 **Settings → General → Backup** 中找到）会写出一个只有你本人可读的 `.ccinnpsql-backup` 文件：
+
+| 内容 | 默认 | 说明 |
+|---|---|---|
+| 连接 | 总是包含 | 主机、端口、用户、数据库、`sslmode` 与根证书路径、SSH 路由、AI 访问权限；从不包含 SSH 私钥或证书文件 |
+| 知识库及关联项目 | 开 | 关系、说明、术语表、主题域；位于主目录下的路径写成 `~/…` |
+| 应用设置 | 开 | 外观、自动 `LIMIT`、SQL 格式化、更新检查；不包含窗口位置 |
+| 查询历史 | 关 | 已去除其中的密码，但仍可能包含表名和字面量 |
+| 密码与 SSH 密钥口令 | 关 | 只有设置口令（至少 12 个字符，输入两次）时才包含 |
+
+**密码**使用 AES-256-GCM 加密，密钥由口令派生（PBKDF2-HMAC-SHA256，60 万次迭代），口令同时校验整个文件未被篡改。口令不会被保存：遗失后密码无法恢复，但其余内容仍可导入。
+
+在另一台 Mac 上选择 **文件 ▸ Import Settings and Knowledge…**：打开文件，输入口令（或选择不导入密码），在写入任何内容之前先看到预览：
+
+- **连接**：新增、未变化，或与本机不同。不同时可选「保留本机（Keep mine）」「使用导入（Use imported）」「两者都保留（Keep both）」，默认建议较新的修改。会降低安全性的改动会被高亮（换了服务器或 SSH 路由、更弱的 `sslmode`、换了根证书、更多 AI 权限、明文密码、执行修改前不再确认、允许 AI 使用特权角色）；对于没有口令、任何人都可能写出的文件，这些改动默认保留本机设置，除非你另行选择。允许 AI 使用特权角色这一项只会从经口令校验的文件导入。
+- **知识库**逐条合并：本机内容不会丢失，备份中记录的删除会生效，说明和术语以较新的版本为准。
+- **项目**若不在本机会被标出。可以为单个项目指定文件夹，也可以一次性替换公共前缀（`/Volumes/Work/code` → `~/code`）。
+- **设置**显示「旧值 → 新值」，每项可单独取消；**历史**显示每个连接新增多少条语句。
+
+导入前会先把当前配置（不含密码）保存到应用数据目录下的 `Backups/`，保留最近 5 份。导入报告提供 **Restore Pre-Import Snapshot**，只撤销这次导入写入的内容：它新增或替换的连接、新增的密码、知识库、历史记录和设置；导入之后你新建或修改的连接、执行的查询都会保留。被导入替换的密码无法恢复；如果该连接因此回到另一台服务器，导入的密码会被删除而不会发往那里，需要重新输入。中途失败的撤销可以再次执行。同一个文件再次导入不会产生任何改动。若导入改动了连接，请在 AI 客户端中重启 MCP 服务（Claude Code 中用 `/mcp`），让它读到新的连接。
+
 ## MCP 服务：让 AI 查询 PostgreSQL
 
 CcinnPsql 内置 **Model Context Protocol** 服务。**Claude Code**、**Codex**、**Claude Desktop**、Cursor 等 AI 助手可以通过它，使用你保存的连接浏览数据库并执行查询。
@@ -184,6 +209,22 @@ CcinnPsql 内置 **Model Context Protocol** 服务。**Claude Code**、**Codex**
 | 目录 | `list_databases`、`list_schemas`、`list_tables`、`describe_table`（列、约束、索引、触发器、分区、DDL） |
 | 洞察 | `get_table_stats`（空间、死元组、VACUUM、膨胀估算、未使用索引）、`get_activity`（会话与阻塞树）、`get_replication`、`get_top_statements` |
 | SQL | `run_query`、`explain_query`（计划树，可选 ANALYZE），以及仅在读写连接上提供的 `execute_statement` |
+| 知识库（读） | `list_knowledge`、`knowledge_overview`、`search_knowledge`、`explain_table`、`find_join_path`、`er_diagram`、`refresh_knowledge` |
+| 知识库（写） | `link_project`、`add_notes`、`add_relationships`、`define_terms`、`define_subject_area`、`remove_knowledge` |
+
+提示词（prompts）：`build_knowledge`（分析当前项目和一个 schema 并记录结论）和 `answer_with_knowledge`（写 SQL 前先查知识库）。Claude Code 中可用 `/mcp__ccinnpsql__build_knowledge` 调用。
+
+### 知识库
+
+外键只说明了一半：人们真正在用的关联（比如没有约束的 `report.dsp_id` → `dsp.id`）存在于代码和查询历史里。知识库把两者连同 AI 准确快速作答所需的其他信息一起记录下来，供每个 AI 会话复用。
+
+- **应用内不内置 AI。** CcinnPsql 只读取系统目录（从不读取数据行）并做推断；打开了代码仓库的 AI 客户端负责读代码，再通过知识库工具把结论写回。
+- **每个 schema 一份知识库**，以服务器地址（经 SSH 隧道时包含跳板机）和数据库为键，所有连到该服务器的连接共享，并可关联任意多个本地项目。在已关联项目中启动的会话用 `list_knowledge` 即可找到。
+- **每条关系都带证据**：声明的外键、视图与物化视图定义中的 JOIN、编辑器查询历史中的 JOIN、表名与列名、代码引用（路径、行号、符号）以及 AI 的判断。置信度（0–100）由证据计算：已启用且已校验的外键是事实（100）；`NOT VALID` 和 PostgreSQL 18 的 `NOT ENFORCED` 外键为 95（可能有行不满足）；其余一律标注为*推断*。你在应用里的「确认 / 否定」始终优先。
+- **新鲜度。** 每张表的结构都有指纹。表结构变化后，基于旧结构写下的说明和关系会标为过期，直到有人重新确认；已删除的表会保留，直到你手动清理。分区并入其父表。
+- **给答案，而不只是画图。** `find_join_path` 返回连接路径、`ON` 条件、SQL 骨架，并在行数会被放大时给出警告。`explain_table` 还会给出提示，例如「按分区键 `dt` 过滤」及主键。`er_diagram` 按主题域、表清单、某张表的周边或名称前缀生成 Mermaid 图。
+- **在应用中**：右键 schema → **Knowledge**：刷新、审核推断出的关系（确认 / 否定）、说明与术语表、主题域的 ER 图（复制 Mermaid），以及关联的项目（关联、重新定位、取消关联）。
+- 文件保存在 `~/Library/Application Support/CcinnPsql/Knowledge/`（仅本人可读写），应用与 `mcp` 进程可安全地同时使用。
 
 **安全**
 
@@ -194,7 +235,10 @@ CcinnPsql 内置 **Model Context Protocol** 服务。**Claude Code**、**Codex**
 - 结果最多 1,000 行（默认 200 行）、约 256 KB；语句默认 30 秒超时（最长 120 秒）。
 - 在 AI 客户端取消请求时，会向 PostgreSQL 发送 CancelRequest。
 - `--read-only` 把所有连接限制为只读；`--profile <名称>` 指定默认连接。
-- 每次调用都会写入 `~/Library/Application Support/CcinnPsql/mcp-audit.jsonl`（权限 0600，密码已脱敏）。
+- 每次调用都会写入 `~/Library/Application Support/CcinnPsql/mcp-audit.jsonl`（权限 0600，密码已脱敏），包含 AI 客户端名称；写入知识库时还会记录改了什么。
+- **知识库跟随角色权限。** 知识库工具与其他工具经过相同的检查（特权角色检查、拒绝 PgBouncer 管理控制台）。AI 只能看到已开启 AI 访问的连接的知识库，并且只包含该角色可使用的 schema 和可读取的表（有任一列可读即算）——即使知识库是通过权限更高的连接建立的。
+- **知识库不存数据。** 不保存数据行、样例值、DDL 或代码：只有结构、带证据的关系（路径、行号、符号、字面量已替换的 SQL 摘要）和说明。注释、说明和术语文本以「不可信数据」的标注交给 AI，而不是指令。
+- **谁可以写。** AI 只写本机的知识库文件，从不改动服务器，因此只读连接也允许写；可在 **Settings → MCP → AI may write knowledge** 按连接关闭，或用 `--no-knowledge-writes` 对整个服务关闭。你写下、确认或否定的内容，AI 永远无法修改或删除。
 
 ## 从源码构建
 

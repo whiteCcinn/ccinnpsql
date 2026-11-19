@@ -81,6 +81,8 @@ CcinnPsql answers those in one click. It is a native SwiftUI/AppKit app with its
   - SSH tunnels through the system `ssh`, secrets in the Keychain.
   - **PgBouncer and Pgpool-II aware**: transaction pooling is detected (or set per connection) and session features degrade with an explanation instead of silently breaking; the PgBouncer admin console works for `SHOW POOLS` and friends.
 - **MCP server** so AI assistants can explore your databases and run read-only queries through the connections you allow (see below).
+- **A knowledge base the AI builds once and reuses.** Per schema: how tables relate (declared foreign keys, view definitions, your query history, names, and the code your AI reads), notes, a glossary in any language, subject areas and ER diagrams, linked to your local projects. Later sessions answer from it instead of rediscovering the schema. See [Knowledge base](#knowledge-base).
+- **Move to another Mac in one step.** File ▸ Export Settings and Knowledge… writes one file with your connections, the knowledge base and its linked projects, settings and, if you like, query history; passwords only when you seal them with a passphrase. Import shows what will change before anything is written, and can be undone. See [Moving to another Mac](#moving-to-another-mac).
 
 ## Compatibility
 
@@ -150,6 +152,29 @@ Useful shortcuts:
 | **⇧⌘R** | Refresh schemas |
 | **⇧⌘D** | Disconnect |
 
+## Moving to another Mac
+
+**File ▸ Export Settings and Knowledge…** (also in **Settings → General → Backup**) writes a single `.ccinnpsql-backup` file, readable only by you:
+
+| Part | Included | Notes |
+|---|---|---|
+| Connections | always | host, port, user, database, `sslmode` and root certificate path, SSH route, AI access; never SSH keys or certificate files |
+| Knowledge and linked projects | on | relationships, notes, glossary, subject areas; paths under your home are written `~/…` |
+| App settings | on | appearance, automatic `LIMIT`, SQL formatting, update checks; never window positions |
+| Query history | off | statements with passwords removed; they may still contain table names and literal values |
+| Passwords and SSH secrets | off | only with a passphrase (at least 12 characters, entered twice) |
+
+**Passwords** are encrypted with AES-256-GCM under a key derived from your passphrase (PBKDF2-HMAC-SHA256, 600,000 iterations), and the passphrase also authenticates the whole file. It is never stored: lose it and the passwords cannot be recovered, but everything else still imports.
+
+On the other Mac, **File ▸ Import Settings and Knowledge…** opens the file, asks for the passphrase (or imports without passwords), and shows a preview before writing anything:
+
+- **Connections**: new, unchanged, or different from the one here. For a difference choose *Keep mine*, *Use imported* or *Keep both*; the newer edit is suggested. Changes that weaken security are highlighted (another server or SSH route, a weaker `sslmode`, another root certificate, more AI access, clear-text passwords, no confirmation before changes, the privileged-role opt-in), and from a file without a passphrase, which anyone could have written, they keep your current setting unless you choose otherwise. AI access on a privileged role is only ever taken from a passphrase-verified file.
+- **Knowledge** merges item by item: nothing here is lost, deletions recorded in the backup are applied, and the newer copy of a note or term wins.
+- **Projects** that are not on this Mac are marked. Point one at a folder, or move them all at once (`/Volumes/Work/code` → `~/code`).
+- **Settings** show old → new, each one optional; **history** shows how many statements each connection gains.
+
+Importing first saves your current setup (without passwords) to `Backups/` in the app's data folder, keeping the last five. The report offers **Restore Pre-Import Snapshot**, which undoes exactly what the import wrote: connections it added or replaced, the passwords it added, knowledge, history entries and settings. Connections you add or change and queries you run afterwards are kept. A password the import replaced cannot be put back; if its connection goes back to another server, the imported password is removed rather than sent there, and you enter it again. A restore that stops part-way can be run again. Importing the same file again changes nothing. After an import that changed connections, restart the MCP server in your AI clients (`/mcp` in Claude Code) so they see them.
+
 ## MCP server: let AI query PostgreSQL
 
 CcinnPsql has a built-in **Model Context Protocol** server. AI assistants such as **Claude Code**, **Codex**, **Claude Desktop** or Cursor can use it to explore your databases and run queries through your saved connections.
@@ -184,6 +209,22 @@ CcinnPsql has a built-in **Model Context Protocol** server. AI assistants such a
 | Catalog | `list_databases`, `list_schemas`, `list_tables`, `describe_table` (columns, constraints, indexes, triggers, partitions, DDL) |
 | Insights | `get_table_stats` (sizes, dead tuples, vacuum, bloat estimates, unused indexes), `get_activity` (sessions and blocking tree), `get_replication`, `get_top_statements` |
 | SQL | `run_query`, `explain_query` (plan tree, optional ANALYZE), and `execute_statement` (read & write connections only) |
+| Knowledge (read) | `list_knowledge`, `knowledge_overview`, `search_knowledge`, `explain_table`, `find_join_path`, `er_diagram`, `refresh_knowledge` |
+| Knowledge (write) | `link_project`, `add_notes`, `add_relationships`, `define_terms`, `define_subject_area`, `remove_knowledge` |
+
+Prompts: `build_knowledge` (analyse this project and a schema, and record what it finds) and `answer_with_knowledge` (look things up before writing SQL). Claude Code offers them as `/mcp__ccinnpsql__build_knowledge`.
+
+### Knowledge base
+
+Foreign keys tell half the story: the joins people actually use (`report.dsp_id` → `dsp.id` with no constraint) live in code and query history. The knowledge base keeps both, with everything else an AI needs to answer quickly and correctly, and every AI session reuses it.
+
+- **No AI inside the app.** CcinnPsql reads the catalog (never rows) and infers what it can; your AI client, which has the repository open, reads the code and writes back what it learns through the knowledge tools.
+- **One knowledge base per schema**, keyed by the server's endpoint (through the SSH bastion when tunnelled) and the database, shared by every connection that reaches it, and linked to any number of local projects. A session started in a linked project finds it with `list_knowledge`.
+- **Relationships carry their evidence**: declared foreign keys, joins inside view and materialized-view definitions, joins in the editor's query history, column and table names, code references (path, line, symbol) and AI assertions. Confidence (0–100) is computed from the evidence. An enforced, validated foreign key is a fact (100); `NOT VALID` and PostgreSQL 18's `NOT ENFORCED` keys score 95, because rows may break them; everything else is labelled *inferred*. Your Confirm or Reject in the app always wins.
+- **Freshness.** Each table's structure has a fingerprint. When a table changes, notes and relationships written against it are marked stale until someone confirms them again; dropped tables are kept until you prune them. Partitions fold into their parent.
+- **Answers, not just pictures.** `find_join_path` returns the join chain with its `ON` conditions, a SQL skeleton and a warning when rows would multiply. `explain_table` adds hints such as "filter on the partition key `dt`" and the primary key. `er_diagram` draws a Mermaid diagram of one subject area, a list of tables, the tables around one, or a prefix.
+- **In the app**: right-click a schema → **Knowledge**: refresh, review inferred relationships (Confirm / Reject), notes and glossary, the diagram of a subject area (Copy Mermaid), and linked projects (Link, Remap, Unlink).
+- Files live in `~/Library/Application Support/CcinnPsql/Knowledge/` (owner-only); the app and the `mcp` process share them safely.
 
 **Safety**
 
@@ -194,7 +235,10 @@ CcinnPsql has a built-in **Model Context Protocol** server. AI assistants such a
 - Results are capped at 1,000 rows (200 by default) and about 256 KB. Statements time out after 30 s by default (max 120 s).
 - Cancelling a request in the AI client sends a CancelRequest to PostgreSQL.
 - `--read-only` caps every connection at read-only; `--profile <name>` picks the default connection.
-- Every call is logged, with passwords redacted, to `~/Library/Application Support/CcinnPsql/mcp-audit.jsonl` (0600).
+- Every call is logged, with passwords redacted, to `~/Library/Application Support/CcinnPsql/mcp-audit.jsonl` (0600), with the AI client's name and, for knowledge writes, what changed.
+- **Knowledge follows the role.** Knowledge tools pass the same checks as every other tool (the privileged-role check, the PgBouncer console refusal). An AI sees knowledge only for connections with AI access, and only the schemas the role may use and the tables it may read (any column counts), even when the knowledge was built through a more privileged connection.
+- **Knowledge holds no data.** No rows, sample values, DDL or code are stored: structure, relationships with evidence (paths, lines, symbols, SQL digests with literals replaced) and notes. Comments, notes and glossary text reach the AI marked as untrusted data, not instructions.
+- **Who may write.** AI writes only local knowledge files, never the server, so it is allowed on read-only connections; turn it off per connection with **Settings → MCP → AI may write knowledge**, or for the whole server with `--no-knowledge-writes`. AI can never change or remove what you wrote, confirmed or rejected.
 
 ## Building from source
 
