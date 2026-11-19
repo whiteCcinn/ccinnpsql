@@ -14,7 +14,8 @@ public enum SecureFile {
             return mkstemp(base) // creates the file with mode 0600
         }
         guard descriptor >= 0 else { throw posixError() }
-        let temporaryPath = String(cString: template)
+        let pathBytes = template.prefix { $0 != 0 }.map { (character: CChar) -> UInt8 in UInt8(bitPattern: character) }
+        let temporaryPath = String(decoding: pathBytes, as: UTF8.self)
         do {
             defer { close(descriptor) }
             guard fchmod(descriptor, 0o600) == 0 else { throw posixError() }
