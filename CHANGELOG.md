@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-19
+
+### Fixed
+
+- **Knowledge tools showed an AI columns its role may not read.** With column grants (`GRANT SELECT (a, b) ON t`), the knowledge still listed every column of the table, because the catalog does, with their comments, keys, notes, glossary mappings and relationships. Knowledge now shows only the columns the role may read, and hides every key, note, mapping and relationship that names another one.
+- **Linking a project read its `.git/config` without limits, while holding the knowledge lock.** A checkout whose `.git/config` was a FIFO, a link to a device or a very large file could stall linking and every other knowledge write. The file is now read only when it is a regular file of at most 64 KB, without following links or blocking, and before the lock is taken.
+
 ## [1.5.0] - 2026-11-19
 
 ### Added
