@@ -259,12 +259,14 @@ public enum BackupImportPlanner {
         }
     }
 
-    /// `profile` keeping `previous`'s privileged-role opt-in only while it signs in as the same role on the same server
-    /// (through the same SSH host): the opt-in was given for that role.
+    /// `profile` keeping `previous`'s privileged-role opt-in only while it signs in as the same role on the same server, as
+    /// `ClusterKey` tells servers apart (through the same SSH host and port): the opt-in was given for that role. The
+    /// database does not matter; roles belong to the whole server.
     static func keepingPrivilegedOptIn(_ profile: ConnectionProfile, from previous: ConnectionProfile) -> ConnectionProfile {
         var copy = profile
         let sameRole: Bool = RoleKey(profile) == RoleKey(previous)
-        copy.mcpAllowPrivilegedRole = sameRole && previous.mcpAllowPrivilegedRole
+        let sameServer: Bool = ClusterKey(profile: profile) == ClusterKey(profile: previous)
+        copy.mcpAllowPrivilegedRole = sameRole && sameServer && previous.mcpAllowPrivilegedRole
         return copy
     }
 

@@ -577,6 +577,17 @@ struct BackupPostgresRoutePlanTests {
         otherBastion.updatedAt = F.date(20)
         #expect(!(try plan(otherBastion, local: local)).imported.mcpAllowPrivilegedRole, "nor one reached through another bastion")
 
+        var tunnelled = local
+        tunnelled.ssh = SSHTunnelConfiguration(host: "bastion.example", port: 22, username: "ops", authentication: .password)
+        var otherSSHPort = tunnelled
+        otherSSHPort.ssh?.port = 2222
+        otherSSHPort.updatedAt = F.date(20)
+        #expect(!(try plan(otherSSHPort, local: tunnelled)).imported.mcpAllowPrivilegedRole, "or through another port of it")
+        var otherSSHUser = tunnelled
+        otherSSHUser.ssh?.username = "deploy"
+        otherSSHUser.updatedAt = F.date(20)
+        #expect(try plan(otherSSHUser, local: tunnelled).imported.mcpAllowPrivilegedRole, "another bastion user reaches the same server")
+
         var renamed = local
         renamed.name = "prod 2"
         renamed.updatedAt = F.date(20)
